@@ -15,6 +15,8 @@ pub enum Currency {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../packages/core-types/bindings/")]
 pub struct UsageSnapshot {
+    // i64 在 serde_json 中序列化为 number，ts-rs 默认导出 bigint，显式对齐
+    #[ts(type = "number")]
     pub platform_id: i64,
     pub balance: f64,
     pub used: f64,

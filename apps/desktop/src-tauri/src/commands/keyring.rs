@@ -3,7 +3,7 @@
 
 use toogl_core::keystore::{KeyringStore, SecretStore};
 
-const SERVICE_NAME: &str = "app.toogl.desktop";
+pub const SERVICE_NAME: &str = "app.toogl.desktop";
 
 fn store() -> KeyringStore {
     KeyringStore::new(SERVICE_NAME)

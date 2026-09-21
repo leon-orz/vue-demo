@@ -27,4 +27,11 @@ export default defineConfigWithVueTs(
       ],
     },
   },
+  {
+    // shadcn-vue CLI 生成的组件源码：props 缺省值交给 withDefaults/cva，保持生成原样
+    files: ['apps/desktop/src/components/ui/**'],
+    rules: {
+      'vue/require-default-prop': 'off',
+    },
+  },
 )

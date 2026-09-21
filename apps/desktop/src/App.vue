@@ -1,99 +1,67 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import {
+  Cloud,
+  HardDrive,
+  LayoutDashboard,
+  ChartLine,
+  Server,
+  Settings,
+  WandSparkles,
+} from '@lucide/vue'
+import { RouterLink, RouterView, useRoute } from 'vue-router'
 
-import { keystoreDelete, keystoreGet, keystoreSet } from '@/api/keyring'
-import { useSettingsStore } from '@/stores/settings'
+import { Badge } from '@/components/ui/badge'
 
-const settings = useSettingsStore()
+const route = useRoute()
 
-const keyInput = ref('toogl.dev.test')
-const valueInput = ref('hello-keyring')
-const result = ref('')
-const busy = ref(false)
-
-async function run(action: () => Promise<string>) {
-  busy.value = true
-  try {
-    result.value = await action()
-  } catch (err) {
-    result.value = `失败：${String(err)}`
-  } finally {
-    busy.value = false
-  }
-}
-
-const set = () =>
-  run(async () => {
-    await keystoreSet(keyInput.value, valueInput.value)
-    return `已写入钥匙串：${keyInput.value}`
-  })
-
-const get = () =>
-  run(async () => {
-    const value = await keystoreGet(keyInput.value)
-    return value === null ? '钥匙串中不存在该 key' : `读回：${value}`
-  })
-
-const del = () =>
-  run(async () => {
-    await keystoreDelete(keyInput.value)
-    return `已删除：${keyInput.value}`
-  })
+/** 左侧导航；未交付模块置灰并标注里程碑 */
+const navItems = [
+  { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard, enabled: true },
+  { to: '/kimi', label: 'Kimi 统计', icon: ChartLine, enabled: true },
+  { to: '/gateway', label: '我的 API 平台', icon: Cloud, enabled: false, milestone: '阶段二' },
+  { to: '/server', label: '服务器', icon: Server, enabled: false, milestone: '阶段二' },
+  { to: '/nas', label: 'NAS', icon: HardDrive, enabled: false, milestone: '阶段二' },
+  { to: '/proxy', label: '魔法工具', icon: WandSparkles, enabled: false, milestone: 'S1-3' },
+  { to: '/settings', label: '设置', icon: Settings, enabled: true },
+]
 </script>
 
 <template>
-  <main class="flex min-h-screen flex-col items-center justify-center gap-6 bg-background p-8">
-    <header class="text-center">
-      <h1 class="text-4xl font-bold tracking-tight">Toogl · 图格</h1>
-      <p class="mt-2 text-muted-foreground">个人桌面工具箱 —— S1-1 脚手架验证壳</p>
-    </header>
-
-    <section class="w-full max-w-md rounded-lg border bg-card p-6 text-card-foreground shadow-sm">
-      <h2 class="mb-4 text-lg font-semibold">钥匙串存取验证（keyring-rs）</h2>
-      <div class="flex flex-col gap-3">
-        <label class="text-sm">
-          Key
-          <input
-            v-model="keyInput"
-            class="mt-1 w-full rounded-md border bg-background px-3 py-1.5 text-sm"
-          />
-        </label>
-        <label class="text-sm">
-          Value
-          <input
-            v-model="valueInput"
-            class="mt-1 w-full rounded-md border bg-background px-3 py-1.5 text-sm"
-          />
-        </label>
-        <div class="flex gap-2">
-          <button
-            :disabled="busy"
-            class="rounded-md bg-primary px-3 py-1.5 text-sm text-primary-foreground disabled:opacity-50"
-            @click="set"
-          >
-            写入
-          </button>
-          <button
-            :disabled="busy"
-            class="rounded-md border px-3 py-1.5 text-sm disabled:opacity-50"
-            @click="get"
-          >
-            读取
-          </button>
-          <button
-            :disabled="busy"
-            class="rounded-md border px-3 py-1.5 text-sm text-destructive disabled:opacity-50"
-            @click="del"
-          >
-            删除
-          </button>
-        </div>
-        <p v-if="result" class="rounded-md bg-muted px-3 py-2 text-sm">{{ result }}</p>
+  <div class="flex min-h-screen bg-background text-foreground">
+    <aside class="flex w-56 shrink-0 flex-col border-r">
+      <div class="flex h-14 items-center border-b px-5">
+        <span class="text-lg font-bold tracking-tight">图格 Toogl</span>
       </div>
-    </section>
-
-    <footer class="text-xs text-muted-foreground">
-      数据源模式：{{ settings.datasourceMode }}（S1-1 占位）
-    </footer>
-  </main>
+      <nav class="flex flex-col gap-1 p-3">
+        <template v-for="item in navItems" :key="item.to">
+          <RouterLink
+            v-if="item.enabled"
+            :to="item.to"
+            class="flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors"
+            :class="
+              route.path === item.to
+                ? 'bg-accent text-accent-foreground'
+                : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground'
+            "
+          >
+            <component :is="item.icon" class="size-4" />
+            {{ item.label }}
+          </RouterLink>
+          <span
+            v-else
+            class="flex cursor-not-allowed items-center gap-3 rounded-md px-3 py-2 text-sm text-muted-foreground/50"
+          >
+            <component :is="item.icon" class="size-4" />
+            {{ item.label }}
+            <Badge variant="outline" class="ml-auto text-muted-foreground/60">
+              {{ item.milestone }}
+            </Badge>
+          </span>
+        </template>
+      </nav>
+    </aside>
+    <main class="min-w-0 flex-1 overflow-y-auto">
+      <RouterView />
+    </main>
+  </div>
 </template>

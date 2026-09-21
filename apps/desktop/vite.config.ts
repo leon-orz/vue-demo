@@ -30,6 +30,14 @@ export default defineConfig({
   build: {
     // 仅支持 Windows，WebView2 跟随系统 Chromium 内核
     target: 'chrome120',
-    // TODO(S1-3)：引入 ECharts 后按包手动分包（Vite 8 Rolldown 用 output.advancedChunks）
+    rollupOptions: {
+      output: {
+        // Vite 8（Rolldown）：ECharts 单独分包，避免拖慢首屏（Kimi 页已做路由懒加载）
+        advancedChunks: {
+          groups: [{ name: 'echarts', test: /node_modules[\\/]echarts/ }],
+        },
+      },
+    },
+    // TODO(S1-3)：mihomo 相关模块接入后视体积再评估分包
   },
 })

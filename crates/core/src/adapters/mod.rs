@@ -1,4 +1,8 @@
-//! 平台适配器统一 trait。加新平台 = 加一个文件 + 注册一行（S1-2 落地 newapi / kimi）。
+//! 平台适配器统一 trait。加新平台 = 加一个文件 + 注册一行。
+//! S1-2 落地 kimi（开放平台余额）；new-api 网关适配器属阶段二 M2，届时新增 newapi_admin.rs。
+//! 注：第三方中转平台统计已明确不做（《01-需求文档》第 7 章），不会有对应适配器。
+
+pub mod kimi;
 
 use thiserror::Error;
 
@@ -10,6 +14,8 @@ pub enum AdapterError {
     Network(String),
     #[error("认证失败(401/403): {0}")]
     Unauthorized(String),
+    #[error("接口返回错误: {0}")]
+    Api(String),
     #[error("响应解析失败: {0}")]
     Parse(String),
 }
@@ -24,5 +30,5 @@ pub trait UsageAdapter: Send + Sync {
     async fn fetch(&self, base_url: &str, cred: &Credential)
         -> Result<UsageSnapshot, AdapterError>;
 
-    // TODO(S1-2)：quota -> 金额的换算钩子（new-api 默认 $1 = 500,000 quota，可被平台配置覆盖）
+    // TODO(S2-3)：quota -> 金额的换算钩子（new-api 默认 $1 = 500,000 quota，可被平台配置覆盖）
 }

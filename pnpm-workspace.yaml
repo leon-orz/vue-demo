@@ -4,7 +4,11 @@ packages:
 
 # simple-git-hooks 的 postinstall 不需要跑（由根 package.json 的 prepare 脚本负责激活钩子），显式禁止其构建脚本
 allowBuilds:
+  # esbuild 的 postinstall 用于放置平台二进制，必须允许
+  esbuild: true
   simple-git-hooks: false
+  # vue-demi（reka-ui 依赖）的 postinstall 仅按 Vue 版本切换入口文件，允许执行
+  vue-demi: true
 minimumReleaseAgeExclude:
   - '@vue/compiler-core@3.5.43'
   - '@vue/compiler-dom@3.5.43'

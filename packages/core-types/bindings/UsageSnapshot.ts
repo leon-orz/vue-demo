@@ -4,7 +4,7 @@ import type { Currency } from "./Currency";
 /**
  * 各平台适配器的统一输出，适配器内部差异不外泄。
  */
-export type UsageSnapshot = { platform_id: bigint, balance: number, used: number, currency: Currency, 
+export type UsageSnapshot = { platform_id: number, balance: number, used: number, currency: Currency, 
 /**
  * RFC 3339 时间戳
  */
