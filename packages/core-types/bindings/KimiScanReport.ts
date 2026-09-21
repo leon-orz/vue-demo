@@ -9,15 +9,19 @@ export type KimiScanReport = {
  */
 files_found: number, 
 /**
- * 因截断/重建而从头重扫的文件数
+ * 因截断/重建/mtime 变化而从头重扫的文件数
  */
 files_rescanned: number, 
+/**
+ * 读取/取元数据失败而跳过的文件数（游标不动，下次扫描自然重试）
+ */
+files_failed: number, 
 /**
  * 本次新增入库的用量事件数
  */
 events_added: number, 
 /**
- * 跳过的不完整尾行数（写入半途的行，下次续读会覆盖）
+ * 含不完整尾行的文件数（写入半途的行不消费，下次续读覆盖）
  */
 partial_lines_skipped: number, 
 /**

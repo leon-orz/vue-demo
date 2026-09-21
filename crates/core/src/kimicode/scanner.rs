@@ -16,20 +16,31 @@ use crate::models::KimiUsageEvent;
 pub struct ScannedFile {
     pub path: PathBuf,
     pub size: u64,
-    /// Unix 秒 mtime（取不到时为 0）
+    /// Unix 毫秒 mtime（取不到时为 0）
     pub mtime: i64,
     /// 本次读到的新偏移
     pub new_offset: u64,
-    /// 文件变短（截断/重建）触发从头重扫；store 层据此整批删除该文件旧事件
+    /// 触发从头重扫（截断/重建/mtime 变化）；store 层据此整批删除该文件旧事件
     pub truncated: bool,
     pub events: Vec<KimiUsageEvent>,
+}
+
+/// 文件扫描游标（store 层持久化于 kimi_log_file 表）
+#[derive(Debug, Clone, Copy)]
+pub struct FileCursor {
+    pub offset: u64,
+    /// Unix 毫秒
+    pub mtime: i64,
 }
 
 #[derive(Debug, Default)]
 pub struct ScanStats {
     pub files_found: u64,
     pub files_rescanned: u64,
+    /// 取元数据 / 读取失败的文件数（跳过该文件且不更新游标，下次自然重试）
+    pub files_failed: u64,
     pub events_parsed: u64,
+    /// 含不完整尾行的文件数（写入半途的尾行不消费，下次续读覆盖）
     pub partial_lines_skipped: u64,
     pub bad_lines: u64,
 }
@@ -156,8 +167,10 @@ fn read_incremental(
     Ok((consumed, events))
 }
 
-/// 扫描 sessions 根目录。`cursors` 为 path → 已读偏移 的游标表（来自 store 层）。
-pub fn scan(root: &Path, cursors: &HashMap<PathBuf, u64>) -> std::io::Result<ScanOutput> {
+/// 扫描 sessions 根目录。`cursors` 为 path → 游标（已读偏移 + mtime）的表（来自 store 层）。
+/// 单文件容错：任一文件取元数据或读取失败只计入 `stats.files_failed` 并跳过
+/// （不产出 ScannedFile，游标不更新，下次扫描自然重试），不中断整体扫描。
+pub fn scan(root: &Path, cursors: &HashMap<PathBuf, FileCursor>) -> std::io::Result<ScanOutput> {
     let mut paths = Vec::new();
     collect_wire_files(root, &mut paths)?;
     paths.sort();
@@ -166,32 +179,54 @@ pub fn scan(root: &Path, cursors: &HashMap<PathBuf, u64>) -> std::io::Result<Sca
     let mut files = Vec::new();
     for path in paths {
         stats.files_found += 1;
-        let meta = std::fs::metadata(&path)?;
+        let meta = match std::fs::metadata(&path) {
+            Ok(m) => m,
+            Err(_) => {
+                stats.files_failed += 1;
+                continue;
+            }
+        };
         let size = meta.len();
         let mtime = meta
             .modified()
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64)
+            .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
-        let old_offset = cursors.get(&path).copied().unwrap_or(0);
-        // 文件变短说明被截断/重建，从头重扫
-        let truncated = size < old_offset;
-        let offset = if truncated { 0 } else { old_offset };
+        let cursor = cursors.get(&path).copied();
+        let old_offset = cursor.map(|c| c.offset).unwrap_or(0);
+        let old_mtime = cursor.map(|c| c.mtime).unwrap_or(0);
+        // 截断检测放宽：大小或 mtime 任一变化都从头重扫（重扫幂等，代价低，
+        // 可覆盖原地重写、内容替换但长度不变等 size < old_offset 抓不到的场景）
+        let truncated =
+            cursor.is_some() && (size != old_offset || (mtime != 0 && mtime != old_mtime));
         if truncated {
             stats.files_rescanned += 1;
         }
+        if cursor.is_some() && !truncated {
+            // 大小与 mtime 均未变化，无增量可读：跳过项目解析与读取，只更新 last_scanned_at
+            files.push(ScannedFile {
+                path,
+                size,
+                mtime,
+                new_offset: old_offset,
+                truncated: false,
+                events: Vec::new(),
+            });
+            continue;
+        }
         let (project, session_id) = project_of(&path);
-        let (new_offset, events) =
-            read_incremental(&path, offset, &project, &session_id, &mut stats)?;
-        files.push(ScannedFile {
-            path,
-            size,
-            mtime,
-            new_offset,
-            truncated,
-            events,
-        });
+        match read_incremental(&path, 0, &project, &session_id, &mut stats) {
+            Ok((new_offset, events)) => files.push(ScannedFile {
+                path,
+                size,
+                mtime,
+                new_offset,
+                truncated,
+                events,
+            }),
+            Err(_) => stats.files_failed += 1,
+        }
     }
     Ok(ScanOutput { files, stats })
 }
@@ -280,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn incremental_resume_from_offset() {
+    fn appended_file_fully_rescanned() {
         let tmp = tempfile::tempdir().unwrap();
         let wire = make_session(
             tmp.path(),
@@ -290,20 +325,78 @@ mod tests {
             &[&usage_line(1000, 10, 5)],
         );
         let first = scan(tmp.path(), &HashMap::new()).unwrap();
-        let offset = first.files[0].new_offset;
+        let cursor = FileCursor {
+            offset: first.files[0].new_offset,
+            mtime: first.files[0].mtime,
+        };
         assert_eq!(first.stats.events_parsed, 1);
 
-        // 追加两行后再扫：只应读到增量
+        // 追加两行后再扫：size 变化触发从头重扫（读到全部 3 行，幂等由 store 层保证）
         let mut f = File::options().append(true).open(&wire).unwrap();
         writeln!(f, "{}", usage_line(2000, 20, 6)).unwrap();
         writeln!(f, "{}", usage_line(3000, 30, 7)).unwrap();
         drop(f);
 
-        let cursors = HashMap::from([(wire.clone(), offset)]);
+        let cursors = HashMap::from([(wire.clone(), cursor)]);
         let second = scan(tmp.path(), &cursors).unwrap();
-        assert_eq!(second.stats.events_parsed, 2);
-        assert!(second.files[0].new_offset > offset);
+        assert!(second.files[0].truncated);
+        assert_eq!(second.stats.events_parsed, 3);
+        assert!(second.files[0].new_offset > cursor.offset);
+    }
+
+    #[test]
+    fn unchanged_file_skipped_without_reading() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wire = make_session(
+            tmp.path(),
+            "wd_app_aaa",
+            "session_s1",
+            "C:/work/app",
+            &[&usage_line(1000, 10, 5)],
+        );
+        let first = scan(tmp.path(), &HashMap::new()).unwrap();
+        let cursor = FileCursor {
+            offset: first.files[0].new_offset,
+            mtime: first.files[0].mtime,
+        };
+
+        // size 与 mtime 均未变化：跳过读取，只回传游标（store 层仅更新 last_scanned_at）
+        let cursors = HashMap::from([(wire, cursor)]);
+        let second = scan(tmp.path(), &cursors).unwrap();
+        assert_eq!(second.stats.files_found, 1);
+        assert_eq!(second.stats.events_parsed, 0);
+        assert_eq!(second.stats.files_rescanned, 0);
         assert!(!second.files[0].truncated);
+        assert!(second.files[0].events.is_empty());
+        assert_eq!(second.files[0].new_offset, cursor.offset);
+    }
+
+    #[test]
+    fn same_size_rewrite_detected_via_mtime() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wire = make_session(
+            tmp.path(),
+            "wd_app_aaa",
+            "session_s1",
+            "C:/work/app",
+            &[&usage_line(1000, 10, 5)],
+        );
+        let first = scan(tmp.path(), &HashMap::new()).unwrap();
+        let cursor = FileCursor {
+            offset: first.files[0].new_offset,
+            mtime: first.files[0].mtime,
+        };
+
+        // 原地重写为等长内容（长度不变，只有 mtime 变化）：也应触发重扫
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::fs::write(&wire, format!("{}\n", usage_line(9999, 99, 9))).unwrap();
+
+        let cursors = HashMap::from([(wire, cursor)]);
+        let second = scan(tmp.path(), &cursors).unwrap();
+        assert!(second.files[0].truncated);
+        assert_eq!(second.stats.files_rescanned, 1);
+        assert_eq!(second.files[0].events.len(), 1);
+        assert_eq!(second.files[0].events[0].ts, 9999);
     }
 
     #[test]
@@ -317,12 +410,15 @@ mod tests {
             &[&usage_line(1000, 10, 5), &usage_line(2000, 20, 6)],
         );
         let first = scan(tmp.path(), &HashMap::new()).unwrap();
-        let offset = first.files[0].new_offset;
+        let cursor = FileCursor {
+            offset: first.files[0].new_offset,
+            mtime: first.files[0].mtime,
+        };
 
         // 重建为更短的文件
         std::fs::write(&wire, format!("{}\n", usage_line(500, 1, 1))).unwrap();
 
-        let cursors = HashMap::from([(wire, offset)]);
+        let cursors = HashMap::from([(wire, cursor)]);
         let second = scan(tmp.path(), &cursors).unwrap();
         assert!(second.files[0].truncated);
         assert_eq!(second.stats.files_rescanned, 1);
@@ -348,15 +444,56 @@ mod tests {
         let first = scan(tmp.path(), &HashMap::new()).unwrap();
         assert_eq!(first.stats.events_parsed, 1);
         assert_eq!(first.stats.partial_lines_skipped, 1);
-        let offset = first.files[0].new_offset;
+        let cursor = FileCursor {
+            offset: first.files[0].new_offset,
+            mtime: first.files[0].mtime,
+        };
 
-        // 补全该行后再扫，应能读到
+        // 补全该行后再扫：size 变化触发重扫，两条事件都能读到（不完整尾行不会被重复消费）
         let mut f = File::options().append(true).open(&wire).unwrap();
         writeln!(f).unwrap();
         drop(f);
-        let cursors = HashMap::from([(wire, offset)]);
+        let cursors = HashMap::from([(wire, cursor)]);
         let second = scan(tmp.path(), &cursors).unwrap();
-        assert_eq!(second.stats.events_parsed, 1);
+        assert_eq!(second.stats.events_parsed, 2);
+        assert_eq!(second.stats.partial_lines_skipped, 0);
+    }
+
+    /// 单文件容错：被独占占用（不可读）的文件计入 files_failed 并跳过，不影响其他文件。
+    /// Windows 上用 share_mode(0) 独占打开模拟；本项目仅支持 Windows（NF-14）。
+    #[cfg(windows)]
+    #[test]
+    fn unreadable_file_counted_and_skipped() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let good = make_session(
+            tmp.path(),
+            "wd_good",
+            "session_g",
+            "C:/work/good",
+            &[&usage_line(1000, 1, 1)],
+        );
+        let bad = make_session(
+            tmp.path(),
+            "wd_bad",
+            "session_b",
+            "C:/work/bad",
+            &[&usage_line(2000, 2, 2)],
+        );
+        // 不共享任何访问，File::open 将失败
+        let _lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&bad)
+            .unwrap();
+
+        let out = scan(tmp.path(), &HashMap::new()).unwrap();
+        assert_eq!(out.stats.files_found, 2);
+        assert_eq!(out.stats.files_failed, 1);
+        // 只有好的文件产出结果；失败文件不出现（游标不更新，下次自然重试）
+        assert_eq!(out.files.len(), 1);
+        assert_eq!(out.files[0].path, good);
+        assert_eq!(out.stats.events_parsed, 1);
     }
 
     #[test]

@@ -4,6 +4,7 @@
 
 pub mod adapters;
 pub mod datasource;
+pub mod db;
 pub mod keystore;
 pub mod kimicode;
 pub mod mihomo;

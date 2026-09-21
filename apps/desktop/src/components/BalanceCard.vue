@@ -53,12 +53,26 @@ const router = useRouter()
             上次刷新：{{ formatDateTime(kimi.balance.fetched_at) }}
           </p>
         </template>
-        <p v-else-if="kimi.balanceError" class="text-sm text-destructive">
-          {{ kimi.balanceError }}
-        </p>
+        <!-- 刷新失败按错误类别提示：unauthorized 引导去设置页，network 提示重试 -->
+        <div
+          v-else-if="kimi.balanceError"
+          class="flex flex-col items-start gap-2 text-sm text-destructive"
+        >
+          <p v-if="kimi.balanceError.kind === 'unauthorized'">凭据失效，请去设置页重新配置。</p>
+          <p v-else-if="kimi.balanceError.kind === 'network'">网络问题，可重试。</p>
+          <p v-else>{{ kimi.balanceError.message }}</p>
+          <Button
+            v-if="kimi.balanceError.kind === 'unauthorized'"
+            variant="outline"
+            size="sm"
+            @click="router.push('/settings')"
+          >
+            去设置页配置
+          </Button>
+        </div>
         <p v-else class="text-sm text-muted-foreground">暂无余额数据，点击右上角刷新拉取。</p>
         <p v-if="kimi.balance && kimi.balanceError" class="text-xs text-destructive">
-          刷新失败：{{ kimi.balanceError }}
+          刷新失败：{{ kimi.balanceError.message }}
         </p>
       </div>
     </CardContent>

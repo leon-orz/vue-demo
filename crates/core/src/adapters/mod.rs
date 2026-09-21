@@ -6,7 +6,7 @@ pub mod kimi;
 
 use thiserror::Error;
 
-use crate::models::{Credential, UsageSnapshot};
+use crate::models::{CommandError, Credential, UsageSnapshot};
 
 #[derive(Debug, Error)]
 pub enum AdapterError {
@@ -18,6 +18,16 @@ pub enum AdapterError {
     Api(String),
     #[error("响应解析失败: {0}")]
     Parse(String),
+}
+
+impl From<AdapterError> for CommandError {
+    fn from(e: AdapterError) -> Self {
+        match e {
+            AdapterError::Unauthorized(_) => CommandError::unauthorized(e.to_string()),
+            AdapterError::Network(_) => CommandError::network(e.to_string()),
+            AdapterError::Api(_) | AdapterError::Parse(_) => CommandError::internal(e.to_string()),
+        }
+    }
 }
 
 /// 各平台直连适配器。实现差异（认证方式、quota 换算）隔离在各自文件内。

@@ -6,6 +6,6 @@
  */
 export type KimiUsageTotals = { input_other: number, output: number, cache_read: number, cache_creation: number, cache_hit_rate: number | null, 
 /**
- * 按内置静态单价表估算的金额（元）。单价未定，当前恒为 0（见 kimicode::pricing 的 TODO）
+ * 按内置静态单价表估算的金额（元）。由查询层填充；单价未定，当前恒为 0（见 kimicode::pricing 的 TODO）
  */
 estimated_cost: number, };

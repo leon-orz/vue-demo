@@ -33,11 +33,13 @@ pub struct KimiUsageTotals {
     #[ts(type = "number")]
     pub cache_creation: i64,
     pub cache_hit_rate: Option<f64>,
-    /// 按内置静态单价表估算的金额（元）。单价未定，当前恒为 0（见 kimicode::pricing 的 TODO）
+    /// 按内置静态单价表估算的金额（元）。由查询层填充；单价未定，当前恒为 0（见 kimicode::pricing 的 TODO）
     pub estimated_cost: f64,
 }
 
 impl KimiUsageTotals {
+    /// 只负责聚合命中率；estimated_cost 由查询层（kimicode::store）按单价表填充，
+    /// 数据层不反向依赖业务层。
     pub fn new(input_other: i64, output: i64, cache_read: i64, cache_creation: i64) -> Self {
         let input_total = input_other + cache_read + cache_creation;
         let cache_hit_rate = if input_total > 0 {
@@ -51,12 +53,7 @@ impl KimiUsageTotals {
             cache_read,
             cache_creation,
             cache_hit_rate,
-            estimated_cost: crate::kimicode::pricing::estimate_cost(
-                input_other,
-                output,
-                cache_read,
-                cache_creation,
-            ),
+            estimated_cost: 0.0,
         }
     }
 }
@@ -122,13 +119,16 @@ pub struct KimiScanReport {
     /// 发现的 wire.jsonl 文件总数
     #[ts(type = "number")]
     pub files_found: u64,
-    /// 因截断/重建而从头重扫的文件数
+    /// 因截断/重建/mtime 变化而从头重扫的文件数
     #[ts(type = "number")]
     pub files_rescanned: u64,
+    /// 读取/取元数据失败而跳过的文件数（游标不动，下次扫描自然重试）
+    #[ts(type = "number")]
+    pub files_failed: u64,
     /// 本次新增入库的用量事件数
     #[ts(type = "number")]
     pub events_added: u64,
-    /// 跳过的不完整尾行数（写入半途的行，下次续读会覆盖）
+    /// 含不完整尾行的文件数（写入半途的行不消费，下次续读覆盖）
     #[ts(type = "number")]
     pub partial_lines_skipped: u64,
     /// 解析失败跳过的行数（诊断指标，不中断扫描）

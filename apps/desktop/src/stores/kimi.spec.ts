@@ -49,6 +49,7 @@ beforeEach(() => {
   mocks.scanKimiLogs.mockResolvedValue({
     files_found: 1,
     files_rescanned: 0,
+    files_failed: 0,
     events_added: 3,
     partial_lines_skipped: 0,
     bad_lines: 0,
@@ -86,6 +87,45 @@ describe('kimi store 聚合加载', () => {
     expect(store.scanError).toContain('目录不存在')
     expect(store.todaySummary).not.toBeNull()
   })
+
+  it('加载失败时不抛异常、不置 initialized、错误进 loadError，且不启动后台扫描', async () => {
+    mocks.kimiUsageSummary.mockRejectedValue({ kind: 'internal', message: '数据库锁定' })
+    const store = useKimiStore()
+    await store.init()
+    expect(store.initialized).toBe(false)
+    expect(store.loadError).toEqual({ kind: 'internal', message: '数据库锁定' })
+    expect(mocks.scanKimiLogs).not.toHaveBeenCalled()
+  })
+
+  it('init 失败后可重试：修复后再次 init 成功并完成初始化', async () => {
+    mocks.kimiUsageSummary.mockRejectedValueOnce(new Error('临时失败'))
+    const store = useKimiStore()
+    await store.init()
+    expect(store.initialized).toBe(false)
+    expect(store.loadError).not.toBeNull()
+
+    await store.init()
+    expect(store.loadError).toBeNull()
+    expect(store.initialized).toBe(true)
+    expect(store.todaySummary?.totals.input_other).toBe(100)
+    await vi.waitFor(() => expect(store.scanning).toBe(false))
+    expect(mocks.scanKimiLogs).toHaveBeenCalledTimes(1)
+  })
+
+  it('retry 在已初始化时只重取聚合并清空错误', async () => {
+    const store = useKimiStore()
+    await store.init()
+    await vi.waitFor(() => expect(store.scanning).toBe(false))
+
+    mocks.kimiUsageSummary.mockRejectedValueOnce(new Error('抖动'))
+    await store.loadAggregates()
+    expect(store.loadError?.message).toBe('抖动')
+
+    await store.retry()
+    expect(store.loadError).toBeNull()
+    // 不重复触发初始化扫描
+    expect(mocks.scanKimiLogs).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe('趋势范围切换', () => {
@@ -101,6 +141,33 @@ describe('趋势范围切换', () => {
     expect(mocks.kimiUsageByProject).toHaveBeenCalledWith('Week')
     expect(mocks.kimiUsageByModel).toHaveBeenCalledWith('Week')
     expect(store.series?.range).toBe('Week')
+  })
+
+  it('快速切换时丢弃过期的旧响应，慢请求不覆盖新数据', async () => {
+    const store = useKimiStore()
+    await store.init()
+    await vi.waitFor(() => expect(store.scanning).toBe(false))
+
+    // Week 响应慢（手动控制），Month 立即返回
+    let resolveWeek!: (v: { range: string; points: never[] }) => void
+    mocks.kimiUsageSeries.mockImplementation((range: KimiUsageRange) => {
+      if (range === 'Week') {
+        return new Promise((resolve) => {
+          resolveWeek = resolve
+        })
+      }
+      return Promise.resolve({ range, points: [] })
+    })
+
+    const weekReq = store.setTrendRange('Week')
+    const monthReq = store.setTrendRange('Month')
+    await monthReq
+    // Month 已落地，Week 的慢响应随后才返回，应被丢弃
+    resolveWeek({ range: 'Week', points: [] })
+    await weekReq
+
+    expect(store.trendRange).toBe('Month')
+    expect(store.series?.range).toBe('Month')
   })
 })
 
@@ -123,6 +190,14 @@ describe('余额', () => {
     const store = useKimiStore()
     await store.refreshBalance()
     expect(store.balance).toBeNull()
-    expect(store.balanceError).toContain('尚未配置')
+    expect(store.balanceError?.kind).toBe('internal')
+    expect(store.balanceError?.message).toContain('尚未配置')
+  })
+
+  it('401 类失败被归类为 unauthorized', async () => {
+    mocks.kimiBalanceRefresh.mockRejectedValue({ kind: 'unauthorized', message: 'token 无效' })
+    const store = useKimiStore()
+    await store.refreshBalance()
+    expect(store.balanceError).toEqual({ kind: 'unauthorized', message: 'token 无效' })
   })
 })

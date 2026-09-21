@@ -2,6 +2,7 @@
 //! GET {api_base}/v1/users/me/balance，Bearer key 认证；key 由调用方从 keystore 取出传入，
 //! 本适配器不接触存储层。字段：available_balance / voucher_balance / cash_balance（人民币元）。
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -11,6 +12,20 @@ use crate::models::{Credential, Currency, KimiBalance, UsageSnapshot};
 
 pub const DEFAULT_API_BASE: &str = "https://api.moonshot.cn";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// 进程级共享的 reqwest 客户端（连接池复用，避免每次新建）
+static SHARED_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+fn shared_client() -> reqwest::Client {
+    SHARED_CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(DEFAULT_TIMEOUT)
+                .build()
+                .expect("reqwest client 构建失败")
+        })
+        .clone()
+}
 
 /// 余额接口响应（外层 code/status 字段忽略，只取 data）
 #[derive(Debug, Deserialize)]
@@ -37,9 +52,12 @@ impl Default for KimiAdapter {
 
 impl KimiAdapter {
     pub fn new() -> Self {
-        Self::with_timeout(DEFAULT_TIMEOUT)
+        Self {
+            client: shared_client(),
+        }
     }
 
+    /// 自定义超时的独立客户端（主要用于测试超时路径）
     pub fn with_timeout(timeout: Duration) -> Self {
         let client = reqwest::Client::builder()
             .timeout(timeout)

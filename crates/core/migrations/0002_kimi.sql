@@ -1,5 +1,6 @@
 -- M1 Kimi 统计（《02-开发计划》M1 数据表要点）
--- 注意：crates/core/src/kimicode/store.rs 以 include_str! 复用本文件建测试库，改动需同步跑 cargo test
+-- 本文件由 crates/core/src/db.rs 按分号切分逐条执行，禁止在字符串字面量中使用分号；
+-- 全部语句必须幂等（IF NOT EXISTS），改动后需同步跑 cargo test
 
 -- Kimi 开放平台账户（单行配置；credential_ref 是 keyring 里的 key，凭据本身不落库）
 CREATE TABLE IF NOT EXISTS kimi_account (
@@ -10,7 +11,7 @@ CREATE TABLE IF NOT EXISTS kimi_account (
     enabled INTEGER NOT NULL DEFAULT 1
 );
 
--- wire.jsonl 增量解析游标：offset 之后的部分下次续读；文件变短则重扫
+-- wire.jsonl 扫描游标：size/mtime（Unix 毫秒）变化即从头重扫；offset 记录上次消费到的位置
 CREATE TABLE IF NOT EXISTS kimi_log_file (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     path TEXT NOT NULL UNIQUE,

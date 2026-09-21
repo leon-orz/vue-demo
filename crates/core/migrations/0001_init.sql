@@ -1,3 +1,6 @@
+-- 本文件由 crates/core/src/db.rs 按分号切分逐条执行，禁止在字符串字面量中使用分号；
+-- 全部语句必须幂等（IF NOT EXISTS）
+
 -- 平台配置：credential_ref 是 keyring 里的 key，凭据本身不落库
 CREATE TABLE IF NOT EXISTS platform (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

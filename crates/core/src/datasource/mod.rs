@@ -11,6 +11,8 @@ pub enum DataSourceError {
     Adapter(#[from] crate::adapters::AdapterError),
     #[error("中枢不可达: {0}")]
     HubUnreachable(String),
+    #[error("功能尚未实现: {0}")]
+    NotImplemented(&'static str),
 }
 
 #[allow(async_fn_in_trait)] // 项目内部 trait，同上
@@ -23,8 +25,11 @@ pub struct DirectSource;
 
 impl DataSource for DirectSource {
     async fn fetch_all_usage(&self) -> Result<Vec<UsageSnapshot>, DataSourceError> {
-        // TODO(S1-2)：遍历启用的 platform，调度对应适配器并发拉取
-        Ok(Vec::new())
+        // TODO(S2-3)：遍历启用的 platform，调度对应适配器并发拉取（随 M2 落地）。
+        // 占位期间显式报错而非返回空 vec，避免把"未实现"误读为"无用量"
+        Err(DataSourceError::NotImplemented(
+            "DirectSource 聚合调度（S2-3，随 M2 落地）",
+        ))
     }
 }
 

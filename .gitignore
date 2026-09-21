@@ -18,3 +18,7 @@ Thumbs.db
 *.local
 
 # 注意：packages/core-types/bindings 由 ts-rs 生成但需要提交，勿忽略
+
+# 环境变量与密钥文件，永不入库
+.env
+.env.*

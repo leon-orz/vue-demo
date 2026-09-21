@@ -1,23 +1,20 @@
 //! Kimi 统计的 SQLite 持久化与聚合查询。
-//! 表结构由 apps/desktop/src-tauri/migrations/0002_kimi.sql 定义（tauri-plugin-sql 执行），
-//! 本模块复用同一份 SQL 建测试库，保证单一事实来源。
+//! 表结构由 crates/core/migrations/ 定义，经 crate::db 按版本号迁移执行（schema 统一收归 Rust 侧）。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use chrono::{Datelike, Local, SecondsFormat, TimeZone, Utc};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool};
 
-use super::scanner::{self, ScanOutput};
+use super::pricing;
+use super::scanner::{self, FileCursor, ScanOutput};
 use super::KimiError;
 use crate::models::{
     KimiBalance, KimiScanReport, KimiUsageGroup, KimiUsagePoint, KimiUsageRange, KimiUsageSeries,
     KimiUsageSummary, KimiUsageTotals,
 };
-
-/// 与 migration 0002 同源的建表 SQL（测试库使用；生产库由 tauri-plugin-sql 迁移执行）
-pub const SCHEMA_SQL: &str =
-    include_str!("../../../../apps/desktop/src-tauri/migrations/0002_kimi.sql");
 
 /// 账户表行（内部类型；对前端暴露的是 models::KimiAccountInfo，has_credential 由命令层补充）
 #[derive(Debug, Clone)]
@@ -28,13 +25,31 @@ pub struct KimiAccountRow {
     pub enabled: bool,
 }
 
+/// group_by 的分组列白名单（枚举约束，禁止外部输入拼接 SQL）
+#[derive(Debug, Clone, Copy)]
+enum GroupBy {
+    Project,
+    Model,
+}
+
+impl GroupBy {
+    fn column(self) -> &'static str {
+        match self {
+            GroupBy::Project => "project",
+            GroupBy::Model => "model",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct KimiStore {
     pool: SqlitePool,
+    /// 扫描互斥锁：并发触发（手动 + 定时任务）时排队执行，避免并发扫描双计入库
+    scan_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl KimiStore {
-    /// 打开（必要时创建）数据库。WAL 模式与 tauri-plugin-sql 的连接共存。
+    /// 打开（必要时创建）数据库，WAL 模式。
     pub async fn connect(db_path: impl AsRef<Path>) -> Result<Self, KimiError> {
         let options = SqliteConnectOptions::new()
             .filename(db_path.as_ref())
@@ -42,17 +57,15 @@ impl KimiStore {
             .pragma("journal_mode", "WAL")
             .pragma("busy_timeout", "5000");
         let pool = SqlitePool::connect_with(options).await?;
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            scan_lock: Arc::new(tokio::sync::Mutex::new(())),
+        })
     }
 
-    /// 仅建表（测试与兜底用；生产环境表由 migration 保证）
+    /// 执行全部未应用的 schema 迁移（幂等，见 crate::db）
     pub async fn migrate(&self) -> Result<(), KimiError> {
-        for stmt in SCHEMA_SQL.split(';') {
-            let stmt = stmt.trim();
-            if !stmt.is_empty() {
-                sqlx::query(stmt).execute(&self.pool).await?;
-            }
-        }
+        crate::db::migrate(&self.pool).await?;
         Ok(())
     }
 
@@ -61,18 +74,29 @@ impl KimiStore {
         self.pool.close().await;
     }
 
-    async fn load_cursors(&self) -> Result<HashMap<PathBuf, u64>, KimiError> {
-        let rows: Vec<(String, i64)> = sqlx::query_as("SELECT path, offset FROM kimi_log_file")
-            .fetch_all(&self.pool)
-            .await?;
+    async fn load_cursors(&self) -> Result<HashMap<PathBuf, FileCursor>, KimiError> {
+        let rows: Vec<(String, i64, i64)> =
+            sqlx::query_as("SELECT path, offset, mtime FROM kimi_log_file")
+                .fetch_all(&self.pool)
+                .await?;
         Ok(rows
             .into_iter()
-            .map(|(p, o)| (PathBuf::from(p), o as u64))
+            .map(|(p, o, m)| {
+                (
+                    PathBuf::from(p),
+                    FileCursor {
+                        offset: o as u64,
+                        mtime: m,
+                    },
+                )
+            })
             .collect())
     }
 
-    /// 增量扫描并入库：续读 → 写事件 → 重算日聚合，全程幂等。
+    /// 扫描并入库：重扫/续读 → 写事件 → 按需重算日聚合，全程幂等。
+    /// 并发调用经互斥锁排队，保证不会双计入库。
     pub async fn scan_and_record(&self, sessions_root: &Path) -> Result<KimiScanReport, KimiError> {
+        let _guard = self.scan_lock.lock().await;
         let cursors = self.load_cursors().await?;
         let output = scanner::scan(sessions_root, &cursors)?;
         self.record(output).await
@@ -81,6 +105,7 @@ impl KimiStore {
     async fn record(&self, output: ScanOutput) -> Result<KimiScanReport, KimiError> {
         let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
         let mut events_added: u64 = 0;
+        let has_rescan = output.files.iter().any(|f| f.truncated);
         let mut tx = self.pool.begin().await?;
         for file in &output.files {
             let path = file.path.to_string_lossy();
@@ -105,7 +130,7 @@ impl KimiStore {
                     .fetch_one(&mut *tx)
                     .await?;
             if file.truncated {
-                // 文件被截断/重建：整批删除旧事件后按重扫结果重建
+                // 文件被截断/重建/改写：整批删除旧事件后按重扫结果重建
                 sqlx::query("DELETE FROM kimi_usage_event WHERE log_file_id = ?")
                     .bind(log_file_id)
                     .execute(&mut *tx)
@@ -132,25 +157,29 @@ impl KimiStore {
                 events_added += 1;
             }
         }
-        // 幂等重算日聚合表（个人量级全量重算足够快；页面查询只打聚合表）
-        sqlx::query("DELETE FROM kimi_usage_daily")
+        // 本次扫描无新事件且无重扫时跳过日聚合全量重建（结果必然相同）
+        if events_added > 0 || has_rescan {
+            // 幂等重算日聚合表（个人量级全量重算足够快；页面查询只打聚合表）
+            sqlx::query("DELETE FROM kimi_usage_daily")
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query(
+                "INSERT INTO kimi_usage_daily (date, project, model,
+                     input_other, output, cache_read, cache_creation)
+                 SELECT date(ts / 1000, 'unixepoch', 'localtime'), project, model,
+                        SUM(input_other), SUM(output), SUM(cache_read), SUM(cache_creation)
+                 FROM kimi_usage_event
+                 GROUP BY 1, 2, 3",
+            )
             .execute(&mut *tx)
             .await?;
-        sqlx::query(
-            "INSERT INTO kimi_usage_daily (date, project, model,
-                 input_other, output, cache_read, cache_creation)
-             SELECT date(ts / 1000, 'unixepoch', 'localtime'), project, model,
-                    SUM(input_other), SUM(output), SUM(cache_read), SUM(cache_creation)
-             FROM kimi_usage_event
-             GROUP BY 1, 2, 3",
-        )
-        .execute(&mut *tx)
-        .await?;
+        }
         tx.commit().await?;
 
         Ok(KimiScanReport {
             files_found: output.stats.files_found,
             files_rescanned: output.stats.files_rescanned,
+            files_failed: output.stats.files_failed,
             events_added,
             partial_lines_skipped: output.stats.partial_lines_skipped,
             bad_lines: output.stats.bad_lines,
@@ -182,6 +211,17 @@ impl KimiStore {
         date.format("%Y-%m-%d").to_string()
     }
 
+    /// 填充估值金额（单价表在业务层 kimicode::pricing，数据模型不反向依赖）
+    fn with_estimated_cost(mut totals: KimiUsageTotals) -> KimiUsageTotals {
+        totals.estimated_cost = pricing::estimate_cost(
+            totals.input_other,
+            totals.output,
+            totals.cache_read,
+            totals.cache_creation,
+        );
+        totals
+    }
+
     async fn totals_where(&self, range: KimiUsageRange) -> Result<KimiUsageTotals, KimiError> {
         let (source, marker) = Self::range_source(range);
         let row: (i64, i64, i64, i64) = if source == "event" {
@@ -204,7 +244,9 @@ impl KimiStore {
             .fetch_one(&self.pool)
             .await?
         };
-        Ok(KimiUsageTotals::new(row.0, row.1, row.2, row.3))
+        Ok(Self::with_estimated_cost(KimiUsageTotals::new(
+            row.0, row.1, row.2, row.3,
+        )))
     }
 
     pub async fn summary(&self, range: KimiUsageRange) -> Result<KimiUsageSummary, KimiError> {
@@ -214,12 +256,13 @@ impl KimiStore {
         })
     }
 
-    /// 按项目 / 按模型分组（group_col 只允许白名单列名，禁止外部输入拼接）
+    /// 按项目 / 按模型分组
     async fn group_by(
         &self,
         range: KimiUsageRange,
-        group_col: &str,
+        group: GroupBy,
     ) -> Result<Vec<KimiUsageGroup>, KimiError> {
+        let group_col = group.column();
         let (source, marker) = Self::range_source(range);
         let rows: Vec<(String, i64, i64, i64, i64)> = if source == "event" {
             sqlx::query_as(&format!(
@@ -247,7 +290,7 @@ impl KimiStore {
             .into_iter()
             .map(|(key, a, b, c, d)| KimiUsageGroup {
                 key,
-                totals: KimiUsageTotals::new(a, b, c, d),
+                totals: Self::with_estimated_cost(KimiUsageTotals::new(a, b, c, d)),
             })
             .collect())
     }
@@ -256,14 +299,14 @@ impl KimiStore {
         &self,
         range: KimiUsageRange,
     ) -> Result<Vec<KimiUsageGroup>, KimiError> {
-        self.group_by(range, "project").await
+        self.group_by(range, GroupBy::Project).await
     }
 
     pub async fn usage_by_model(
         &self,
         range: KimiUsageRange,
     ) -> Result<Vec<KimiUsageGroup>, KimiError> {
-        self.group_by(range, "model").await
+        self.group_by(range, GroupBy::Model).await
     }
 
     /// 用量趋势时间序列（M1 趋势图）：
@@ -306,20 +349,20 @@ impl KimiStore {
                 .into_iter()
                 .map(|(bucket, a, b, c, d)| KimiUsagePoint {
                     bucket,
-                    totals: KimiUsageTotals::new(a, b, c, d),
+                    totals: Self::with_estimated_cost(KimiUsageTotals::new(a, b, c, d)),
                 })
                 .collect(),
         })
     }
 
-    /// 今日零点（本地时区）的 Unix 毫秒时间戳；极端情况下回退为 24 小时前
+    /// 今日零点（本地时区）的 Unix 毫秒时间戳；极端情况下回退为当前时刻（宁可少算，不错算昨日）
     fn local_midnight_ms() -> i64 {
         Local::now()
             .date_naive()
             .and_hms_opt(0, 0, 0)
             .and_then(|dt| Local.from_local_datetime(&dt).single())
             .map(|dt| dt.timestamp_millis())
-            .unwrap_or_else(|| Utc::now().timestamp_millis() - 24 * 3600 * 1000)
+            .unwrap_or_else(|| Utc::now().timestamp_millis())
     }
 
     pub async fn account_get(&self) -> Result<Option<KimiAccountRow>, KimiError> {
@@ -470,7 +513,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn incremental_offset_and_truncation_rescan() {
+    async fn append_and_truncation_trigger_idempotent_rescan() {
         let (tmp, store) = temp_store().await;
         let now = Utc::now().timestamp_millis();
         make_session(
@@ -482,7 +525,7 @@ mod tests {
         );
         store.scan_and_record(tmp.path()).await.unwrap();
 
-        // 追加一行 → 只增量入库
+        // 追加一行 → size 变化触发从头重扫：旧事件整批替换为全量（2 条），不双计
         let wire = tmp
             .path()
             .join("wd_app_a/session_s1/agents/main/wire.jsonl");
@@ -490,8 +533,10 @@ mod tests {
         writeln!(f, "{}", usage_line(now, "m1", 20, 2, 0)).unwrap();
         drop(f);
         let report = store.scan_and_record(tmp.path()).await.unwrap();
-        assert_eq!(report.events_added, 1);
-        assert_eq!(report.files_rescanned, 0);
+        assert_eq!(report.events_added, 2);
+        assert_eq!(report.files_rescanned, 1);
+        let summary = store.summary(KimiUsageRange::Day).await.unwrap();
+        assert_eq!(summary.totals.input_other, 30);
 
         // 截断重建 → 旧事件整批替换，不双计
         std::fs::write(&wire, format!("{}\n", usage_line(now, "m1", 5, 5, 5))).unwrap();
@@ -500,6 +545,107 @@ mod tests {
         let summary = store.summary(KimiUsageRange::Day).await.unwrap();
         assert_eq!(summary.totals.input_other, 5);
         assert_eq!(summary.totals.output, 5);
+    }
+
+    #[tokio::test]
+    async fn concurrent_scans_are_serialized_without_double_counting() {
+        let (tmp, store) = temp_store().await;
+        let now = Utc::now().timestamp_millis();
+        make_session(
+            tmp.path(),
+            "wd_app_a",
+            "session_s1",
+            "C:/work/app",
+            &[
+                usage_line(now, "m1", 10, 1, 0),
+                usage_line(now, "m1", 20, 2, 0),
+                usage_line(now, "m2", 30, 3, 0),
+            ],
+        );
+
+        // 并发触发两次扫描：互斥锁排队执行，第二次读到游标后无增量
+        let (r1, r2) = tokio::join!(
+            store.scan_and_record(tmp.path()),
+            store.scan_and_record(tmp.path())
+        );
+        let (r1, r2) = (r1.unwrap(), r2.unwrap());
+        assert_eq!(r1.events_added + r2.events_added, 3);
+
+        let summary = store.summary(KimiUsageRange::Day).await.unwrap();
+        assert_eq!(summary.totals.input_other, 60);
+        assert_eq!(summary.totals.output, 6);
+    }
+
+    #[tokio::test]
+    async fn skips_daily_rebuild_when_no_new_events() {
+        let (tmp, store) = temp_store().await;
+        let now = Utc::now().timestamp_millis();
+        make_session(
+            tmp.path(),
+            "wd_app_a",
+            "session_s1",
+            "C:/work/app",
+            &[usage_line(now, "m1", 10, 1, 0)],
+        );
+        let report = store.scan_and_record(tmp.path()).await.unwrap();
+        assert_eq!(report.events_added, 1);
+
+        // 破坏日聚合表后做无增量扫描：不应触发重算（表保持被破坏状态）
+        sqlx::query("DELETE FROM kimi_usage_daily")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        let report = store.scan_and_record(tmp.path()).await.unwrap();
+        assert_eq!(report.events_added, 0);
+        assert_eq!(report.files_rescanned, 0);
+        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM kimi_usage_daily")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    /// 单文件失败容错（store 层贯通）：不可读文件计入 files_failed、游标不更新，恢复后重扫入库。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn failed_file_skipped_and_retried_next_scan() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (tmp, store) = temp_store().await;
+        let now = Utc::now().timestamp_millis();
+        make_session(
+            tmp.path(),
+            "wd_good",
+            "session_g",
+            "C:/work/good",
+            &[usage_line(now, "m1", 1, 1, 0)],
+        );
+        make_session(
+            tmp.path(),
+            "wd_bad",
+            "session_b",
+            "C:/work/bad",
+            &[usage_line(now, "m1", 2, 2, 0)],
+        );
+        let bad_wire = tmp.path().join("wd_bad/session_b/agents/main/wire.jsonl");
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&bad_wire)
+            .unwrap();
+
+        let report = store.scan_and_record(tmp.path()).await.unwrap();
+        assert_eq!(report.files_found, 2);
+        assert_eq!(report.files_failed, 1);
+        assert_eq!(report.events_added, 1);
+        let summary = store.summary(KimiUsageRange::Day).await.unwrap();
+        assert_eq!(summary.totals.input_other, 1);
+
+        // 释放占用后重扫：失败文件自然补回
+        drop(lock);
+        let report = store.scan_and_record(tmp.path()).await.unwrap();
+        assert_eq!(report.files_failed, 0);
+        let summary = store.summary(KimiUsageRange::Day).await.unwrap();
+        assert_eq!(summary.totals.input_other, 3);
     }
 
     #[tokio::test]

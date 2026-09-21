@@ -14,6 +14,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Separator } from '@/components/ui/separator'
+import { toCommandError } from '@/api/errors'
 import { useKimiStore } from '@/stores/kimi'
 import { useSettingsStore, type ThemeMode } from '@/stores/settings'
 
@@ -57,7 +58,7 @@ async function saveAccount() {
     apiKey.value = ''
     saveMessage.value = '已保存（API Key 已写入系统钥匙串）'
   } catch (err) {
-    saveMessage.value = `保存失败：${String(err)}`
+    saveMessage.value = `保存失败：${toCommandError(err).message}`
   } finally {
     saving.value = false
   }

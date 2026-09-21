@@ -25,11 +25,11 @@ apps/
     src/                  # Vue 前端：api/（invoke 封装，与 Rust 命令一一对应）、
                           #   stores/（Pinia）、views/、components/、lib/
     src-tauri/            # Rust 壳：src/commands/（Tauri commands 薄壳）、
-                          #   sidecar.rs（mihomo 进程管理，待落地）、
-                          #   migrations/（SQLite 迁移）、binaries/（sidecar 二进制）
+                          #   sidecar.rs（mihomo 进程管理，待落地）、binaries/（sidecar 二进制）
   hub/                    # 中枢服务 toogl-hub（axum + tokio，跑在一体机 Linux 上，无界面，阶段二）
 crates/
-  core/                   # 共享核心 toogl-core：models / adapters / datasource / keystore / mihomo
+  core/                   # 共享核心 toogl-core：models / adapters / datasource / keystore / mihomo / kimicode
+                          #   migrations/（SQLite schema，由 src/db.rs 按版本号迁移执行）
 packages/
   core-types/             # @toogl/core-types：TS 类型，ts-rs 从 Rust models 生成
   ui/                     # @toogl/ui：共享 Vue 组件（预留，基本为空）
@@ -68,8 +68,8 @@ cargo test -p toogl-core -- --ignored keyring_real_roundtrip   # 真实系统钥
 - **TS/Vue**：ESLint 管规则、Prettier 管格式，职责分开（`eslint-config-prettier` 收尾）。Prettier：无分号、单引号、printWidth 100、trailing comma all、LF。TS strict 全开 + `noUnusedLocals` / `noUnusedParameters`；有意未使用的变量用下划线前缀（ESLint 约定）。Vue 用 `<script setup>` + Composition API；页面级组件允许单词命名。
 - **前端路径别名**：`@/` → `apps/desktop/src/`（vite.config.ts 与 tsconfig 均配置）。
 - **类型纪律（重要）**：`packages/core-types/bindings/` **禁止手改**，只由 ts-rs 生成；前端 `invoke` 的参数/返回类型必须来自该包。改 Rust models 后跑 `export_bindings` 测试并提交生成物，CI 用 `git diff --exit-code` 校验。
-- **Tauri commands**：`src-tauri/src/commands/` 只做薄壳调 `toogl_core`，前端在 `src/api/` 写一一对应的 invoke 封装。
-- **SQLite migration**：在 `src-tauri/migrations/` 新增 `NNNN_description.sql`，并在 `src-tauri/src/lib.rs` 的 `migrations()` 追加，`version` 严格递增、只增不改。
+- **Tauri commands**：`src-tauri/src/commands/` 只做薄壳调 `toogl_core`，前端在 `src/api/` 写一一对应的 invoke 封装。所有命令统一返回 `Result<T, CommandError>`（`crates/core/src/models/error.rs`，ts-rs 导出）；前端 invoke 抛出的即该 JSON 对象，经 `src/api/errors.ts` 的 `toCommandError` 规整后展示/分支。
+- **SQLite migration**：schema 统一收归 Rust 侧（tauri-plugin-sql 已移除，前端不直连数据库）。在 `crates/core/migrations/` 新增 `NNNN_description.sql`，并在 `crates/core/src/db.rs` 的 `MIGRATIONS` 追加，`version` 严格递增、只增不改；SQL 按分号切分逐条执行（**禁止字符串字面量内含分号**），全部语句幂等（IF NOT EXISTS）。
 - **UI 组件**：shadcn-vue（new-york 风格、neutral 底色、lucide 图标，见 `components.json`）+ Tailwind CSS 4；**不使用成品 UI 库**（Naive UI / Element Plus 已排除），不混用 UnoCSS。图表用 ECharts 按需引入（控制包体积）。
 - **提交钩子**：simple-git-hooks + lint-staged，只对暂存文件跑 prettier + eslint --fix；全仓检查由 CI 兜底。
 - **依赖管理**：精确版本 + lockfile 提交；crates.io 走 rsproxy 国内镜像。
@@ -92,4 +92,8 @@ cargo test -p toogl-core -- --ignored keyring_real_roundtrip   # 真实系统钥
 
 ## 当前状态
 
-阶段一早期（S1-1 前后）：脚手架、keystore 命令、SQLite migration 框架、`UsageSnapshot`/`Credential` 模型与 ts-rs 链路已就绪；平台适配器、mihomo 客户端、wire.jsonl 解析器、hub API（`/usage` `/config` `/control`）等多为带 TODO 的骨架，任务号见各文件注释与《02-开发计划》。
+阶段一 S1-2 已完成（脚手架 S1-1 + Kimi 统计 M1 前后端全链路）：
+
+- 已就绪：monorepo 脚手架与 CI、keystore 命令（keyring 显式 windows-native，SERVICE_NAME 统一在 `keystore::KEYRING_SERVICE_NAME`）、Rust 侧统一 schema 迁移（`crates/core/migrations/` 0001 platform/usage_snapshot + 0002 kimi 五表，由 `db::migrate` 幂等执行；tauri-plugin-sql 已移除）、`crates/core/kimicode`（wire.jsonl 扫描：单文件容错 + size/mtime 变化触发幂等重扫 + 按日预聚合，真实日志验证约 1360 文件 / 27,000+ 事件 / 0 坏行；扫描互斥锁防并发双计）、Kimi 余额适配器（reqwest client 静态复用，wiremock 覆盖 401/超时/字段缺失）、Tauri commands（统一返回结构化 `CommandError`；Kimi 模块初始化失败降级为 unavailable 不 panic；余额刷新编排在 `kimicode::refresh_balance`）、前端路由 + Kimi 页 / Dashboard / Settings、ts-rs bindings 链路（含 index.ts 完整性测试）、Vitest 单测（format / kimi store / errors 适配）。
+- 骨架待落地：mihomo 客户端与 sidecar（S1-3）、DirectSource 聚合调度（随 M2/S2-3）、HubSource（S2-2）、hub API /usage /config /control（S2-1，现仅 /api/v1/health）。
+- 已知占位：用量估值单价表全 0（estimated_cost 恒 0，待官方价格确认，将迁移为 M6 可配置项）。

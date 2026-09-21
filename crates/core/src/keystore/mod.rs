@@ -16,6 +16,15 @@ pub enum KeystoreError {
     LockPoisoned,
 }
 
+/// 桌面端 keyring 命名空间（与应用 identifier 一致，统一在此定义）
+pub const KEYRING_SERVICE_NAME: &str = "app.toogl.desktop";
+
+impl From<KeystoreError> for crate::models::CommandError {
+    fn from(e: KeystoreError) -> Self {
+        crate::models::CommandError::internal(e.to_string())
+    }
+}
+
 pub trait SecretStore: Send + Sync {
     fn set(&self, key: &str, value: &str) -> Result<(), KeystoreError>;
     /// key 不存在时返回 Ok(None)

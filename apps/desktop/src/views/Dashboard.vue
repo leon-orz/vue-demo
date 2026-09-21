@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { ArrowRight, WandSparkles } from '@lucide/vue'
 import { onMounted } from 'vue'
+import { RouterLink } from 'vue-router'
 
 import CacheHitBadge from '@/components/CacheHitBadge.vue'
+import LoadErrorBanner from '@/components/LoadErrorBanner.vue'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { formatTokens, inputTotal } from '@/lib/format'
@@ -22,6 +24,13 @@ onMounted(() => kimi.init(settings.kimiSessionsDir || undefined))
       <h1 class="text-2xl font-bold tracking-tight">Dashboard</h1>
       <p class="mt-1 text-sm text-muted-foreground">各模块状态摘要，点击卡片进入对应模块。</p>
     </header>
+
+    <!-- Kimi 数据加载失败时在此提示（与 Kimi 页同一横幅） -->
+    <LoadErrorBanner
+      v-if="kimi.loadError"
+      :error="kimi.loadError"
+      @retry="kimi.retry(settings.kimiSessionsDir || undefined)"
+    />
 
     <section class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
       <!-- DB-01：Kimi 今日用量摘要；DB-02：点击跳转 Kimi 页 -->

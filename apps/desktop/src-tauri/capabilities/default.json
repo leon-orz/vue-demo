@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Toogl 默认能力集",
   "windows": ["main"],
-  "permissions": ["core:default", "sql:default"]
+  "permissions": ["core:default"]
 }

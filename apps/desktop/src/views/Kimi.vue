@@ -5,6 +5,7 @@ import { onMounted } from 'vue'
 import BalanceCard from '@/components/BalanceCard.vue'
 import CacheHitBadge from '@/components/CacheHitBadge.vue'
 import GroupBarList from '@/components/GroupBarList.vue'
+import LoadErrorBanner from '@/components/LoadErrorBanner.vue'
 import UsageTrendChart from '@/components/UsageTrendChart.vue'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -52,6 +53,13 @@ onMounted(() => kimi.init(settings.kimiSessionsDir || undefined))
         {{ kimi.scanning ? '扫描中…' : '重新扫描' }}
       </Button>
     </header>
+
+    <!-- 初始化/聚合加载失败：分类提示，可重试或去设置页 -->
+    <LoadErrorBanner
+      v-if="kimi.loadError"
+      :error="kimi.loadError"
+      @retry="kimi.retry(settings.kimiSessionsDir || undefined)"
+    />
 
     <!-- 概览卡片 -->
     <section class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -129,7 +137,7 @@ onMounted(() => kimi.init(settings.kimiSessionsDir || undefined))
         </Tabs>
       </CardHeader>
       <CardContent>
-        <UsageTrendChart v-if="kimi.series" :series="kimi.series" />
+        <UsageTrendChart v-if="kimi.series?.points.length" :series="kimi.series" />
         <p v-else class="py-10 text-center text-sm text-muted-foreground">暂无数据</p>
       </CardContent>
     </Card>

@@ -16,6 +16,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test:rust": "cargo test --workspace",
+    "test:front": "pnpm --filter toogl-desktop test",
     "prepare": "simple-git-hooks"
   },
   "devDependencies": {
@@ -32,7 +33,7 @@
     "pre-commit": "pnpm exec lint-staged"
   },
   "lint-staged": {
-    "*.{ts,mts,js,mjs,cjs,vue,json,css,html,yml,yaml,md}": "prettier --write",
+    "*.{ts,mts,js,mjs,cjs,vue,json,css,html}": "prettier --write",
     "*.{ts,mts,js,mjs,cjs,vue}": "eslint --fix"
   }
 }

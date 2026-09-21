@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { usePreferredDark } from '@vueuse/core'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import { echarts } from '@/lib/echarts'
@@ -11,11 +12,12 @@ const settings = useSettingsStore()
 const el = ref<HTMLDivElement | null>(null)
 let chart: echarts.ECharts | null = null
 
-/** 暗色模式下坐标轴/提示框跟随主题 */
+/** 系统级暗色偏好（响应式，系统切换主题时自动更新） */
+const preferredDark = usePreferredDark()
+
+/** 暗色模式下坐标轴/提示框跟随主题；system 时跟随系统，亮/暗时强制 */
 const isDark = computed(
-  () =>
-    settings.theme === 'dark' ||
-    (settings.theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches),
+  () => settings.theme === 'dark' || (settings.theme === 'system' && preferredDark.value),
 )
 
 function render() {
@@ -65,7 +67,8 @@ onBeforeUnmount(() => {
   chart?.dispose()
   chart = null
 })
-watch(() => [props.series, isDark.value], render, { deep: true })
+// store 永远整体替换 series，浅 watch 即可，无需 deep
+watch([() => props.series, isDark], render)
 </script>
 
 <template>
