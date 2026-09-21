@@ -1,0 +1,13 @@
+[package]
+name = "toogl-hub"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Toogl 中枢服务（跑在一体机上，无界面）"
+
+[dependencies]
+toogl-core = { path = "../../crates/core" }
+axum = "0.8"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

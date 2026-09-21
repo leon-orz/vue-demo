@@ -1,0 +1,19 @@
+packages:
+  - 'apps/*'
+  - 'packages/*'
+
+# simple-git-hooks 的 postinstall 不需要跑（由根 package.json 的 prepare 脚本负责激活钩子），显式禁止其构建脚本
+allowBuilds:
+  simple-git-hooks: false
+minimumReleaseAgeExclude:
+  - '@vue/compiler-core@3.5.43'
+  - '@vue/compiler-dom@3.5.43'
+  - '@vue/compiler-sfc@3.5.43'
+  - '@vue/compiler-ssr@3.5.43'
+  - '@vue/reactivity@3.5.43'
+  - '@vue/runtime-core@3.5.43'
+  - '@vue/runtime-dom@3.5.43'
+  - '@vue/server-renderer@3.5.43'
+  - '@vue/shared@3.5.43'
+  - prettier@3.9.8
+  - vue@3.5.43

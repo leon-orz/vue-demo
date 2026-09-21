@@ -1,0 +1,20 @@
+# dependencies
+node_modules/
+
+# build outputs
+dist/
+target/
+**/src-tauri/target/
+**/src-tauri/gen/
+
+# logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# editor / OS
+.DS_Store
+Thumbs.db
+*.local
+
+# 注意：packages/core-types/bindings 由 ts-rs 生成但需要提交，勿忽略

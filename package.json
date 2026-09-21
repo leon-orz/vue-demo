@@ -1,0 +1,38 @@
+{
+  "name": "toogl",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.4.1",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "pnpm --filter toogl-desktop dev",
+    "build": "pnpm --filter toogl-desktop build",
+    "tauri": "pnpm --filter toogl-desktop tauri",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test:rust": "cargo test --workspace",
+    "prepare": "simple-git-hooks"
+  },
+  "devDependencies": {
+    "@vue/eslint-config-typescript": "^14.9.0",
+    "eslint": "^9.39.5",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-vue": "^10.11.0",
+    "lint-staged": "^17.5.1",
+    "prettier": "^3.9.8",
+    "simple-git-hooks": "^2.14.0",
+    "typescript": "~5.9.3"
+  },
+  "simple-git-hooks": {
+    "pre-commit": "pnpm exec lint-staged"
+  },
+  "lint-staged": {
+    "*.{ts,mts,js,mjs,cjs,vue,json,css,html,yml,yaml,md}": "prettier --write",
+    "*.{ts,mts,js,mjs,cjs,vue}": "eslint --fix"
+  }
+}

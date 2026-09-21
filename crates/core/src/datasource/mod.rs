@@ -1,0 +1,41 @@
+//! 数据获取层抽象（见《02-开发计划》1.5）：DirectSource 直连各平台，
+//! HubSource 从中枢拉取（阶段二）。UI 层面向 trait 编程，切换数据源零改动。
+
+use thiserror::Error;
+
+use crate::models::UsageSnapshot;
+
+#[derive(Debug, Error)]
+pub enum DataSourceError {
+    #[error("适配器错误: {0}")]
+    Adapter(#[from] crate::adapters::AdapterError),
+    #[error("中枢不可达: {0}")]
+    HubUnreachable(String),
+}
+
+#[allow(async_fn_in_trait)] // 项目内部 trait，同上
+pub trait DataSource: Send + Sync {
+    async fn fetch_all_usage(&self) -> Result<Vec<UsageSnapshot>, DataSourceError>;
+}
+
+/// 阶段一默认：客户端直连各平台
+pub struct DirectSource;
+
+impl DataSource for DirectSource {
+    async fn fetch_all_usage(&self) -> Result<Vec<UsageSnapshot>, DataSourceError> {
+        // TODO(S1-2)：遍历启用的 platform，调度对应适配器并发拉取
+        Ok(Vec::new())
+    }
+}
+
+/// 阶段二：从 hub 拉取聚合快照；连续不可达时由上层降级回 DirectSource
+pub struct HubSource {
+    pub hub_base_url: String,
+}
+
+impl DataSource for HubSource {
+    async fn fetch_all_usage(&self) -> Result<Vec<UsageSnapshot>, DataSourceError> {
+        // TODO(S2-2)：GET {hub_base_url}/api/v1/usage
+        Err(DataSourceError::HubUnreachable(self.hub_base_url.clone()))
+    }
+}
