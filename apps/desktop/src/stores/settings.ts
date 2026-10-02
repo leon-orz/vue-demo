@@ -3,7 +3,7 @@ import { ref, watch } from 'vue'
 
 // TODO(S2)：偏好迁移到 get_settings/set_setting 命令（SQLite）——当前 localStorage，清 WebView 数据会丢
 
-export type DatasourceMode = 'direct' | 'hub' | 'gateway'
+export type DatasourceMode = 'direct' | 'hub'
 export type ThemeMode = 'light' | 'dark' | 'system'
 
 const THEME_KEY = 'toogl.settings.theme'

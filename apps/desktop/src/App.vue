@@ -1,13 +1,5 @@
 <script setup lang="ts">
-import {
-  Cloud,
-  HardDrive,
-  LayoutDashboard,
-  ChartLine,
-  Server,
-  Settings,
-  WandSparkles,
-} from '@lucide/vue'
+import { HardDrive, LayoutDashboard, ChartLine, Server, Settings, WandSparkles } from '@lucide/vue'
 import { RouterLink, RouterView, useRoute } from 'vue-router'
 
 import { Badge } from '@/components/ui/badge'
@@ -18,7 +10,6 @@ const route = useRoute()
 const navItems = [
   { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard, enabled: true },
   { to: '/kimi', label: 'Kimi 统计', icon: ChartLine, enabled: true },
-  { to: '/gateway', label: '我的 API 平台', icon: Cloud, enabled: false, milestone: '阶段二' },
   { to: '/server', label: '服务器', icon: Server, enabled: false, milestone: '阶段二' },
   { to: '/nas', label: 'NAS', icon: HardDrive, enabled: false, milestone: '阶段二' },
   { to: '/proxy', label: '魔法工具', icon: WandSparkles, enabled: false, milestone: 'S1-3' },

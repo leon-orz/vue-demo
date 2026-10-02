@@ -9,13 +9,13 @@ Toogl（图格）是一个**个人自用的 Windows 桌面工具箱**：Tauri 2 
 
 主要功能模块（编号与 PRD 对齐）：
 
-- **M1 Kimi 统计**：解析本机 `~/.kimi-code/sessions/**/wire.jsonl` 会话日志，聚合 token 用量 / 缓存命中率 / 最近 5 小时窗口；另查 Kimi 开放平台余额。
-- **M2 我的 API 平台**：自建 new-api 网关用量只读展示。
+- **M1 AI 用量统计（多平台聚合）**：解析 kimi-code `~/.kimi-code/sessions/**/wire.jsonl`、MiMo Code `~/.local/share/mimocode/mimocode.db`（SQLite 只读）、oh-my-pi（omp）`~/.omp/agent/sessions/**/*.jsonl` 三类本地 CLI 日志，统一聚合 token 用量 / 缓存命中率 / 趋势 / 分布；配额余额分平台适配（Kimi 非官方 usages 接口 best-effort、DeepSeek 官方 `/user/balance`、MiMo 手录总额 + 本地推算）。只读聚合，不转发流量。不支持 Codex CLI 日志；GLM 套餐不列入；dsh 为阶段三预留。
+- **M2 我的 API 平台（已取消）**：不再自建 new-api 网关，需求并入 M1，编号保留不复用。取消原因：官方套餐直连已够用、MiMo 条款禁止套餐额度用于非编程场景、免去网关运维负担。
 - **M3 服务器 / M4 NAS**：一体机的监控、容器管理、WoL 远程开机、磁盘健康（阶段二起）。
 - **M5 魔法工具**：内嵌 mihomo sidecar（RESTful API 默认 9090），做节点切换、系统代理开关、规则分流。
 - **M6 设置 + Dashboard**。
 
-分阶段开发：阶段一（不依赖新硬件，桌面端直连模式）→ 阶段二（一体机到位，部署 hub 中枢与 new-api）→ 阶段三（按需增强）。代码中的 `TODO(S1-2)` 等标记对应各阶段任务号。
+分阶段开发：阶段一（不依赖新硬件，桌面端直连模式）→ 阶段二（一体机到位，部署 hub 中枢服务 M3/M4，不再部署 new-api）→ 阶段三（按需增强）。代码中的 `TODO(S1-2)` 等标记对应各阶段任务号。
 
 ## 仓库结构
 
@@ -29,6 +29,7 @@ apps/
   hub/                    # 中枢服务 toogl-hub（axum + tokio，跑在一体机 Linux 上，无界面，阶段二）
 crates/
   core/                   # 共享核心 toogl-core：models / adapters / datasource / keystore / mihomo / kimicode
+                          #   （mimocode / omp 多平台日志解析待落地，随 S1-4）
                           #   migrations/（SQLite schema，由 src/db.rs 按版本号迁移执行）
 packages/
   core-types/             # @toogl/core-types：TS 类型，ts-rs 从 Rust models 生成
@@ -63,7 +64,7 @@ cargo test -p toogl-core -- --ignored keyring_real_roundtrip   # 真实系统钥
 
 ## 代码风格与约定
 
-- **注释与文档用中文**；提交信息用英文 Conventional Commits，scope 用模块小写名（kimi/gateway/server/nas/proxy/settings/hub/core）。
+- **注释与文档用中文**；提交信息用英文 Conventional Commits，scope 用模块小写名（usage/server/nas/proxy/settings/hub/core）。
 - **Rust**：rustfmt（4 空格缩进，见 `.editorconfig`）+ clippy，CI 中 `-D warnings`。错误类型用 thiserror；内部 trait 允许 `async fn`（已 `#[allow(async_fn_in_trait)]`）。
 - **TS/Vue**：ESLint 管规则、Prettier 管格式，职责分开（`eslint-config-prettier` 收尾）。Prettier：无分号、单引号、printWidth 100、trailing comma all、LF。TS strict 全开 + `noUnusedLocals` / `noUnusedParameters`；有意未使用的变量用下划线前缀（ESLint 约定）。Vue 用 `<script setup>` + Composition API；页面级组件允许单词命名。
 - **前端路径别名**：`@/` → `apps/desktop/src/`（vite.config.ts 与 tsconfig 均配置）。
@@ -95,5 +96,5 @@ cargo test -p toogl-core -- --ignored keyring_real_roundtrip   # 真实系统钥
 阶段一 S1-2 已完成（脚手架 S1-1 + Kimi 统计 M1 前后端全链路）：
 
 - 已就绪：monorepo 脚手架与 CI、keystore 命令（keyring 显式 windows-native，SERVICE_NAME 统一在 `keystore::KEYRING_SERVICE_NAME`）、Rust 侧统一 schema 迁移（`crates/core/migrations/` 0001 platform/usage_snapshot + 0002 kimi 五表，由 `db::migrate` 幂等执行；tauri-plugin-sql 已移除）、`crates/core/kimicode`（wire.jsonl 扫描：单文件容错 + size/mtime 变化触发幂等重扫 + 按日预聚合，真实日志验证约 1360 文件 / 27,000+ 事件 / 0 坏行；扫描互斥锁防并发双计）、Kimi 余额适配器（reqwest client 静态复用，wiremock 覆盖 401/超时/字段缺失）、Tauri commands（统一返回结构化 `CommandError`；Kimi 模块初始化失败降级为 unavailable 不 panic；余额刷新编排在 `kimicode::refresh_balance`）、前端路由 + Kimi 页 / Dashboard / Settings、ts-rs bindings 链路（含 index.ts 完整性测试）、Vitest 单测（format / kimi store / errors 适配）。
-- 骨架待落地：mihomo 客户端与 sidecar（S1-3）、DirectSource 聚合调度（随 M2/S2-3）、HubSource（S2-2）、hub API /usage /config /control（S2-1，现仅 /api/v1/health）。
-- 已知占位：用量估值单价表全 0（estimated_cost 恒 0，待官方价格确认，将迁移为 M6 可配置项）。
+- 骨架待落地：mihomo 客户端与 sidecar（S1-3）、S1-4 AI 用量聚合多平台泛化（mimocode/omp parser、配额适配器、前端泛化）、DirectSource 聚合调度（随 S1-4）、HubSource（S2-2，服务阶段二 M3/M4）、hub API /usage /config /control（S2-1，现仅 /api/v1/health）。
+- 已知占位：用量估值单价表全 0（estimated_cost 恒 0，待官方价格确认，将迁移为 M6 可配置项）；MiMo 配额无公开 API，只能手录总额 + 本地日志推算消耗。

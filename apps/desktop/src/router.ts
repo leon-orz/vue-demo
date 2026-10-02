@@ -19,12 +19,6 @@ export const router = createRouter({
       meta: { title: 'Kimi 统计' },
     },
     {
-      path: '/gateway',
-      name: 'gateway',
-      component: () => import('@/views/PlaceholderView.vue'),
-      meta: { title: '我的 API 平台', milestone: '阶段二交付' },
-    },
-    {
       path: '/server',
       name: 'server',
       component: () => import('@/views/PlaceholderView.vue'),
