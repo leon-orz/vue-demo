@@ -174,14 +174,18 @@ describe('趋势范围切换', () => {
 describe('余额', () => {
   it('刷新成功更新 balance 并清空错误', async () => {
     mocks.kimiBalanceRefresh.mockResolvedValue({
-      available: 10,
-      voucher: 2,
-      cash: 8,
+      platform: 'kimi',
+      total: null,
+      used: null,
+      remaining: 10,
+      detail_json:
+        '{"sources":{"balance":{"available":10,"voucher":2,"cash":8,"currency":"cny"},"coding_usages":null,"coding_usages_error":null}}',
       fetched_at: '2026-01-01T00:00:00Z',
     })
     const store = useKimiStore()
     await store.refreshBalance()
-    expect(store.balance?.available).toBe(10)
+    expect(store.balance?.remaining).toBe(10)
+    expect(store.balanceDetail?.voucher).toBe(2)
     expect(store.balanceError).toBeNull()
   })
 

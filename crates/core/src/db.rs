@@ -32,6 +32,11 @@ pub const MIGRATIONS: &[Migration] = &[
         description: "multiplatform_generalization",
         sql: include_str!("../migrations/0003_multiplatform.sql"),
     },
+    Migration {
+        version: 4,
+        description: "cleanup_legacy_kimi_and_gateway_tables",
+        sql: include_str!("../migrations/0004_cleanup_legacy.sql"),
+    },
 ];
 
 /// 按版本号执行未应用过的迁移，并登记到 _toogl_migrations 表。
@@ -95,19 +100,23 @@ mod tests {
             .unwrap();
         assert_eq!(count, MIGRATIONS.len() as i64);
 
-        // 0001 / 0002 的表都已建好
-        let (platform_ok,): (i64,) =
-            sqlx::query_as("SELECT COUNT(*) FROM sqlite_master WHERE name = 'platform'")
+        // 0004 已清理旧表：0001 的 platform / usage_snapshot 与 0002 的 kimi_* 五表全部 DROP
+        for table in [
+            "platform",
+            "usage_snapshot",
+            "kimi_account",
+            "kimi_log_file",
+            "kimi_usage_event",
+            "kimi_usage_daily",
+            "kimi_balance_snapshot",
+        ] {
+            let (ok,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM sqlite_master WHERE name = ?")
+                .bind(table)
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        let (kimi_ok,): (i64,) =
-            sqlx::query_as("SELECT COUNT(*) FROM sqlite_master WHERE name = 'kimi_usage_event'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(platform_ok, 1);
-        assert_eq!(kimi_ok, 1);
+            assert_eq!(ok, 0, "旧表 {table} 应已被 0004 清理");
+        }
 
         // 0003 的新表都已建好
         for table in [
@@ -140,7 +149,7 @@ mod tests {
     #[tokio::test]
     async fn migration_0003_backfills_kimi_data_idempotently() {
         let (_tmp, pool) = temp_pool().await;
-        // 模拟既有数据库：只应用 0001/0002 并登记（不跑 migrate，避免提前应用 0003）
+        // 模拟既有数据库：只应用 0001/0002 并登记（不跑 migrate，避免提前应用 0003+）
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS _toogl_migrations (
                 version INTEGER PRIMARY KEY,
@@ -190,7 +199,15 @@ mod tests {
         .await
         .unwrap();
 
-        migrate(&pool).await.unwrap();
+        // 手动应用 0003 并登记（不走 migrate：0004 会 DROP kimi_* 旧表，
+        // 之后的断言与 0003 重放都依赖旧表仍在）
+        apply_sql(&pool, MIGRATIONS[2].sql).await;
+        sqlx::query("INSERT INTO _toogl_migrations (version, description) VALUES (?, ?)")
+            .bind(MIGRATIONS[2].version)
+            .bind(MIGRATIONS[2].description)
+            .execute(&pool)
+            .await
+            .unwrap();
 
         // 游标回填：platform='kimi'，字段原样保留；新 id 与旧 id 无关（经 path 映射）
         let files: Vec<(i64, String, String, i64, i64, i64)> = sqlx::query_as(
@@ -233,8 +250,7 @@ mod tests {
         assert_eq!(daily[0].4, 10);
         assert_eq!(daily[1].4, 20);
 
-        // 幂等：再走一遍 migrate（登记跳过）+ 语句级重复执行 0003，数据不重不丢
-        migrate(&pool).await.unwrap();
+        // 幂等：语句级重复执行 0003，数据不重不丢
         apply_sql(&pool, MIGRATIONS[2].sql).await;
         let (file_count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM log_file")
             .fetch_one(&pool)
@@ -270,5 +286,86 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(event_count, 0);
+    }
+
+    /// 0004 收尾：kimi_account 配置迁入 platform_account（credential_ref 保留，
+    /// keyring 既有凭据不失效），旧表全部 DROP；重复执行幂等且不覆盖新配置
+    #[tokio::test]
+    async fn migration_0004_migrates_account_and_drops_legacy_tables() {
+        let (_tmp, pool) = temp_pool().await;
+        // 模拟既有数据库：应用 0001~0003 并登记
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS _toogl_migrations (
+                version INTEGER PRIMARY KEY,
+                description TEXT NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for m in &MIGRATIONS[..3] {
+            apply_sql(&pool, m.sql).await;
+            sqlx::query("INSERT INTO _toogl_migrations (version, description) VALUES (?, ?)")
+                .bind(m.version)
+                .bind(m.description)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        // 旧账户表造数（用户已配置的 Kimi 开放平台账户）
+        sqlx::query(
+            "INSERT INTO kimi_account (id, name, api_base, credential_ref, enabled)
+             VALUES (1, '主账号', 'https://api.moonshot.cn', 'kimi-openplatform-api-key', 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        migrate(&pool).await.unwrap();
+
+        // 配置已迁入 platform_account，credential_ref 原样保留
+        let row: (String, String, String, String, i64) = sqlx::query_as(
+            "SELECT platform, name, api_base, credential_ref, enabled FROM platform_account",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0, "kimi");
+        assert_eq!(row.1, "主账号");
+        assert_eq!(row.3, "kimi-openplatform-api-key");
+        assert_eq!(row.4, 1);
+
+        // 旧表全部 DROP
+        for table in [
+            "platform",
+            "usage_snapshot",
+            "kimi_account",
+            "kimi_log_file",
+            "kimi_usage_event",
+            "kimi_usage_daily",
+            "kimi_balance_snapshot",
+        ] {
+            let (ok,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM sqlite_master WHERE name = ?")
+                .bind(table)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(ok, 0, "旧表 {table} 应已被 DROP");
+        }
+
+        // 幂等：再走一遍 migrate（0004 已登记跳过），配置行不重复不覆盖
+        sqlx::query("UPDATE platform_account SET name = '改名后' WHERE platform = 'kimi'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        migrate(&pool).await.unwrap();
+        let rows: Vec<(String,)> =
+            sqlx::query_as("SELECT name FROM platform_account WHERE platform = 'kimi'")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "改名后");
     }
 }

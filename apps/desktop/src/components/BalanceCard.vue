@@ -39,15 +39,24 @@ const router = useRouter()
         <template v-if="kimi.balance">
           <div class="flex items-baseline justify-between">
             <span class="text-sm text-muted-foreground">可用余额</span>
-            <span class="text-2xl font-bold">{{ formatMoney(kimi.balance.available) }}</span>
+            <span v-if="kimi.balance.remaining != null" class="text-2xl font-bold">{{
+              formatMoney(kimi.balance.remaining)
+            }}</span>
+            <span v-else class="text-2xl font-bold">—</span>
           </div>
-          <div class="flex justify-between text-sm text-muted-foreground">
+          <div
+            v-if="kimi.balanceDetail?.voucher != null"
+            class="flex justify-between text-sm text-muted-foreground"
+          >
             <span>赠送额度</span>
-            <span>{{ formatMoney(kimi.balance.voucher) }}</span>
+            <span>{{ formatMoney(kimi.balanceDetail.voucher) }}</span>
           </div>
-          <div class="flex justify-between text-sm text-muted-foreground">
+          <div
+            v-if="kimi.balanceDetail?.cash != null"
+            class="flex justify-between text-sm text-muted-foreground"
+          >
             <span>现金余额</span>
-            <span>{{ formatMoney(kimi.balance.cash) }}</span>
+            <span>{{ formatMoney(kimi.balanceDetail.cash) }}</span>
           </div>
           <p class="mt-1 text-xs text-muted-foreground">
             上次刷新：{{ formatDateTime(kimi.balance.fetched_at) }}

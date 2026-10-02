@@ -38,6 +38,33 @@ impl std::fmt::Display for Platform {
     }
 }
 
+/// 用量查询命令的平台过滤：具体平台或 all（跨平台合计，不过滤 platform 列）。
+/// 序列化为小写字符串（与《02-开发计划》M1 命令表 platform='all' 的约定一致）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "../../../packages/core-types/bindings/")]
+pub enum PlatformFilter {
+    /// 跨平台合计
+    All,
+    Kimi,
+    Mimo,
+    Omp,
+    Deepseek,
+}
+
+impl PlatformFilter {
+    /// 具体平台转为 Some(Platform)，All 转为 None（查询层不加 platform 过滤）
+    pub fn platform(self) -> Option<Platform> {
+        match self {
+            PlatformFilter::All => None,
+            PlatformFilter::Kimi => Some(Platform::Kimi),
+            PlatformFilter::Mimo => Some(Platform::Mimo),
+            PlatformFilter::Omp => Some(Platform::Omp),
+            PlatformFilter::Deepseek => Some(Platform::Deepseek),
+        }
+    }
+}
+
 /// 聚合时间范围（M1-05 / M1-06）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../packages/core-types/bindings/")]
@@ -244,6 +271,17 @@ pub struct ScanReport {
     pub bad_lines: u64,
 }
 
+/// 单平台扫描结果（scan_usage_logs 返回值元素）：单平台失败不影响其他平台，
+/// 失败时 report 为 None、error 带可读原因；成功时 error 为 None。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../packages/core-types/bindings/")]
+pub struct PlatformScanReport {
+    pub platform: Platform,
+    pub report: Option<ScanReport>,
+    /// 面向用户的失败原因（如 "DeepSeek 无本地日志"）
+    pub error: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,6 +290,7 @@ mod tests {
     #[test]
     fn export_bindings() {
         Platform::export().unwrap();
+        PlatformFilter::export().unwrap();
         UsageRange::export().unwrap();
         UsageTotals::export().unwrap();
         UsageSummary::export().unwrap();
@@ -264,12 +303,23 @@ mod tests {
         PlatformAccountInfo::export().unwrap();
         PlatformAccountInput::export().unwrap();
         ScanReport::export().unwrap();
+        PlatformScanReport::export().unwrap();
     }
 
     #[test]
     fn platform_serializes_lowercase() {
         assert_eq!(serde_json::to_string(&Platform::Kimi).unwrap(), "\"kimi\"");
         assert_eq!(Platform::Omp.as_str(), "omp");
+    }
+
+    #[test]
+    fn platform_filter_serializes_lowercase_and_maps() {
+        assert_eq!(
+            serde_json::to_string(&PlatformFilter::All).unwrap(),
+            "\"all\""
+        );
+        assert_eq!(PlatformFilter::All.platform(), None);
+        assert_eq!(PlatformFilter::Kimi.platform(), Some(Platform::Kimi));
     }
 
     #[test]

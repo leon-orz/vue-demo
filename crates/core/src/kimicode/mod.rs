@@ -16,14 +16,13 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-use crate::adapters::kimi::KimiAdapter;
-use crate::keystore::SecretStore;
-use crate::models::{CommandError, KimiBalance};
+use crate::models::CommandError;
 
 pub use scanner::{FileCursor, ScanOutput, ScanStats};
 pub use store::KimiStore;
 
-/// keyring 中 Kimi 开放平台 key 的引用名（kimi_account.credential_ref 的默认值）
+/// keyring 中 Kimi 开放平台 key 的引用名（platform_account.credential_ref 的默认值；
+/// 沿用旧 kimi_account 时代的引用名，保证 keyring 中既有凭据不失效）
 pub const KIMI_CREDENTIAL_REF: &str = "kimi-openplatform-api-key";
 
 /// usage_event / usage_daily / log_file 表中本模块写入的 cli 列取值
@@ -61,27 +60,4 @@ pub fn default_sessions_dir() -> Result<PathBuf, KimiError> {
             .join(".kimi-code"),
     };
     Ok(home.join("sessions"))
-}
-
-/// 刷新开放平台余额并写快照（kimi_balance_refresh 命令的业务编排，命令层只留薄壳）：
-/// 查账户 → 从 keystore 取 key → 调适配器 → 写快照。
-pub async fn refresh_balance(
-    store: &KimiStore,
-    secrets: &dyn SecretStore,
-) -> Result<KimiBalance, CommandError> {
-    let account = store
-        .account_get()
-        .await?
-        .ok_or_else(|| CommandError::not_found("尚未配置 Kimi 开放平台账户"))?;
-    if !account.enabled {
-        return Err(CommandError::unavailable("Kimi 开放平台账户已停用"));
-    }
-    let key = secrets.get(&account.credential_ref)?.ok_or_else(|| {
-        CommandError::not_found("keyring 中未找到 Kimi API key，请先在设置中配置")
-    })?;
-    let balance = KimiAdapter::new()
-        .fetch_balance(&account.api_base, &key)
-        .await?;
-    store.save_balance(&balance).await?;
-    Ok(balance)
 }

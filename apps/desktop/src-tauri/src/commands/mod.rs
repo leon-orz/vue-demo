@@ -1,2 +1,2 @@
 pub mod keyring;
-pub mod kimi;
+pub mod usage;

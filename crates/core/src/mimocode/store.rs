@@ -41,10 +41,15 @@ impl MimoStore {
             .pragma("journal_mode", "WAL")
             .pragma("busy_timeout", "5000");
         let pool = SqlitePool::connect_with(options).await?;
-        Ok(Self {
+        Ok(Self::from_pool(pool))
+    }
+
+    /// 基于既有连接池构造（usage::UsageService 单池多 store 共享时走这里）
+    pub fn from_pool(pool: SqlitePool) -> Self {
+        Self {
             pool,
             scan_lock: Arc::new(tokio::sync::Mutex::new(())),
-        })
+        }
     }
 
     /// 执行全部未应用的 schema 迁移（幂等，见 crate::db）

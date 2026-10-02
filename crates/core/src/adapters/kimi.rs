@@ -10,12 +10,24 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use super::{AdapterError, UsageAdapter};
-use crate::models::{Credential, KimiBalance, Platform, QuotaSnapshot};
+use crate::models::{Credential, Platform, QuotaSnapshot};
 
 pub const DEFAULT_API_BASE: &str = "https://api.moonshot.cn";
 /// Kimi Code 套餐用量接口的默认 base（区别于开放平台余额的 api.moonshot.cn）
 pub const DEFAULT_CODING_API_BASE: &str = "https://api.kimi.com";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Kimi 开放平台余额（内部类型，单位人民币元）。
+/// 对外契约是 QuotaSnapshot（quota_snapshot 表），本结构只在适配器内部承载接口字段；
+/// 原为 models::KimiBalance（旧 kimi_balance_* 命令的返回类型），S1-4 收尾时随旧命令下线收回本模块。
+#[derive(Debug, Clone, PartialEq)]
+pub struct KimiBalance {
+    pub available: f64,
+    pub voucher: f64,
+    pub cash: f64,
+    /// RFC 3339 拉取时间
+    pub fetched_at: String,
+}
 
 /// 进程级共享的 reqwest 客户端（连接池复用，避免每次新建）
 static SHARED_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();

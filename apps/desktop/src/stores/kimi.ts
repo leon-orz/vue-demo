@@ -4,8 +4,8 @@ import { computed, ref } from 'vue'
 import { toCommandError, type CommandError } from '@/api/errors'
 import * as api from '@/api/kimi'
 import type {
-  KimiAccountInfo,
-  KimiBalance,
+  PlatformAccountInfo,
+  QuotaSnapshot,
   ScanReport,
   UsageGroup,
   UsageRange,
@@ -16,6 +16,13 @@ import type {
 /** 趋势图可选范围（Last5Hours 不参与趋势切换） */
 export type TrendRange = Exclude<UsageRange, 'Last5Hours'>
 
+/** Kimi 配额快照 detail_json.sources.balance 的明细（开放平台余额分项，单位元） */
+export interface KimiBalanceDetail {
+  available?: number
+  voucher?: number
+  cash?: number
+}
+
 export const useKimiStore = defineStore('kimi', () => {
   /** 各范围汇总（Day / Week / Month / Last5Hours），数据来自 SQLite 聚合表，读取不阻塞 */
   const summaries = ref<Partial<Record<UsageRange, UsageSummary>>>({})
@@ -24,12 +31,12 @@ export const useKimiStore = defineStore('kimi', () => {
   const byProject = ref<UsageGroup[]>([])
   const byModel = ref<UsageGroup[]>([])
 
-  const balance = ref<KimiBalance | null>(null)
+  const balance = ref<QuotaSnapshot | null>(null)
   /** 余额刷新失败原因（结构化）；unauthorized 时 UI 引导去设置页 */
   const balanceError = ref<CommandError | null>(null)
   const balanceLoading = ref(false)
 
-  const account = ref<KimiAccountInfo | null>(null)
+  const account = ref<PlatformAccountInfo | null>(null)
 
   const scanning = ref(false)
   const scanError = ref<string | null>(null)
@@ -44,6 +51,18 @@ export const useKimiStore = defineStore('kimi', () => {
   const todaySummary = computed(() => summaries.value.Day ?? null)
   const last5Summary = computed(() => summaries.value.Last5Hours ?? null)
   const monthSummary = computed(() => summaries.value.Month ?? null)
+
+  /** 解析 balance.detail_json 里的开放平台余额分项（解析失败返回 null，不阻塞页面） */
+  const balanceDetail = computed<KimiBalanceDetail | null>(() => {
+    const raw = balance.value?.detail_json
+    if (!raw) return null
+    try {
+      const parsed = JSON.parse(raw) as { sources?: { balance?: KimiBalanceDetail } }
+      return parsed.sources?.balance ?? null
+    } catch {
+      return null
+    }
+  })
 
   /** 拉取全部聚合数据（汇总 + 当前趋势范围的分组与序列），失败写入 loadError */
   async function loadAggregates() {
@@ -171,6 +190,7 @@ export const useKimiStore = defineStore('kimi', () => {
     byProject,
     byModel,
     balance,
+    balanceDetail,
     balanceError,
     balanceLoading,
     account,

@@ -59,6 +59,13 @@ impl std::fmt::Display for CommandError {
 
 impl std::error::Error for CommandError {}
 
+/// 数据库错误统一归为 internal（编排层用 ? 直接转换）
+impl From<sqlx::Error> for CommandError {
+    fn from(e: sqlx::Error) -> Self {
+        CommandError::internal(e.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -38,7 +38,7 @@ onMounted(async () => {
   await kimi.loadAccount()
   if (kimi.account) {
     accountName.value = kimi.account.name
-    apiBase.value = kimi.account.api_base
+    apiBase.value = kimi.account.api_base ?? ''
   }
 })
 
@@ -46,7 +46,7 @@ async function saveAccount() {
   saving.value = true
   saveMessage.value = ''
   try {
-    // apiKey 留空表示沿用 keyring 中已有 key（见 kimi_account_set 约定）
+    // apiKey 留空表示沿用 keyring 中已有 key（见 platform_account_set 约定）
     await kimi.saveAccount(
       {
         name: accountName.value || '默认账户',

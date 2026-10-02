@@ -1,45 +1,18 @@
-//! Kimi 统计的 SQLite 持久化与聚合查询。
+//! Kimi 统计的 SQLite 持久化（扫描入库）。
 //! 表结构由 crates/core/migrations/ 定义，经 crate::db 按版本号迁移执行（schema 统一收归 Rust 侧）。
+//! 聚合查询已泛化到 usage::query（按 platform 过滤 / 'all' 合计）；
+//! 本 store 保留的 summary / usage_by_* / usage_series 只是 Some(Platform::Kimi) 的薄委托。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use chrono::{Datelike, Local, SecondsFormat, TimeZone, Utc};
+use chrono::{SecondsFormat, Utc};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool};
 
-use super::pricing;
 use super::scanner::{self, FileCursor, ScanOutput};
 use super::{KimiError, KIMI_CLI};
-use crate::models::{
-    KimiBalance, Platform, ScanReport, UsageGroup, UsagePoint, UsageRange, UsageSeries,
-    UsageSummary, UsageTotals,
-};
-
-/// 账户表行（内部类型；对前端暴露的是 models::KimiAccountInfo，has_credential 由命令层补充）
-#[derive(Debug, Clone)]
-pub struct KimiAccountRow {
-    pub name: String,
-    pub api_base: String,
-    pub credential_ref: String,
-    pub enabled: bool,
-}
-
-/// group_by 的分组列白名单（枚举约束，禁止外部输入拼接 SQL）
-#[derive(Debug, Clone, Copy)]
-enum GroupBy {
-    Project,
-    Model,
-}
-
-impl GroupBy {
-    fn column(self) -> &'static str {
-        match self {
-            GroupBy::Project => "project",
-            GroupBy::Model => "model",
-        }
-    }
-}
+use crate::models::{Platform, ScanReport, UsageGroup, UsageRange, UsageSeries, UsageSummary};
 
 #[derive(Debug, Clone)]
 pub struct KimiStore {
@@ -57,10 +30,15 @@ impl KimiStore {
             .pragma("journal_mode", "WAL")
             .pragma("busy_timeout", "5000");
         let pool = SqlitePool::connect_with(options).await?;
-        Ok(Self {
+        Ok(Self::from_pool(pool))
+    }
+
+    /// 基于既有连接池构造（usage::UsageService 单池多 store 共享时走这里）
+    pub fn from_pool(pool: SqlitePool) -> Self {
+        Self {
             pool,
             scan_lock: Arc::new(tokio::sync::Mutex::new(())),
-        })
+        }
     }
 
     /// 执行全部未应用的 schema 迁移（幂等，见 crate::db）
@@ -199,264 +177,30 @@ impl KimiStore {
         })
     }
 
-    /// 各范围的 SQL 来源：天/周/月打预聚合表（按起始日过滤），最近 5 小时走事件表
-    fn range_source(range: UsageRange) -> (String, i64) {
-        match range {
-            UsageRange::Last5Hours => {
-                let cutoff = Utc::now().timestamp_millis() - 5 * 3600 * 1000;
-                ("event".to_string(), cutoff)
-            }
-            UsageRange::Day => ("daily".to_string(), 0),
-            UsageRange::Week => ("daily".to_string(), 1),
-            UsageRange::Month => ("daily".to_string(), 2),
-        }
-    }
-
-    fn range_start_date(kind: i64) -> String {
-        let today = Local::now().date_naive();
-        let date = match kind {
-            0 => today,
-            // 本周一起
-            1 => today.week(chrono::Weekday::Mon).first_day(),
-            // 本月 1 号起
-            _ => today.with_day(1).unwrap_or(today),
-        };
-        date.format("%Y-%m-%d").to_string()
-    }
-
-    /// 填充估值金额（单价表在业务层 kimicode::pricing，数据模型不反向依赖）
-    fn with_estimated_cost(mut totals: UsageTotals) -> UsageTotals {
-        totals.estimated_cost = pricing::estimate_cost(
-            totals.input_other,
-            totals.output,
-            totals.cache_read,
-            totals.cache_creation,
-        );
-        totals
-    }
-
-    async fn totals_where(&self, range: UsageRange) -> Result<UsageTotals, KimiError> {
-        let (source, marker) = Self::range_source(range);
-        // 多平台共用表：本 store 只查 kimi 平台数据
-        let row: (i64, i64, i64, i64) = if source == "event" {
-            sqlx::query_as(
-                "SELECT COALESCE(SUM(input_other),0), COALESCE(SUM(output),0),
-                        COALESCE(SUM(cache_read),0), COALESCE(SUM(cache_creation),0)
-                 FROM usage_event WHERE platform = ? AND ts >= ?",
-            )
-            .bind(Platform::Kimi.as_str())
-            .bind(marker)
-            .fetch_one(&self.pool)
-            .await?
-        } else {
-            let start = Self::range_start_date(marker);
-            sqlx::query_as(
-                "SELECT COALESCE(SUM(input_other),0), COALESCE(SUM(output),0),
-                        COALESCE(SUM(cache_read),0), COALESCE(SUM(cache_creation),0)
-                 FROM usage_daily WHERE platform = ? AND cli = ? AND date >= ?",
-            )
-            .bind(Platform::Kimi.as_str())
-            .bind(KIMI_CLI)
-            .bind(start)
-            .fetch_one(&self.pool)
-            .await?
-        };
-        Ok(Self::with_estimated_cost(UsageTotals::new(
-            row.0, row.1, row.2, row.3,
-        )))
-    }
+    // ---- 聚合查询：薄委托 usage::query（泛化查询层，本平台固定 Some(Platform::Kimi)） ----
 
     pub async fn summary(&self, range: UsageRange) -> Result<UsageSummary, KimiError> {
-        Ok(UsageSummary {
-            range,
-            totals: self.totals_where(range).await?,
-        })
-    }
-
-    /// 按项目 / 按模型分组
-    async fn group_by(
-        &self,
-        range: UsageRange,
-        group: GroupBy,
-    ) -> Result<Vec<UsageGroup>, KimiError> {
-        let group_col = group.column();
-        let (source, marker) = Self::range_source(range);
-        let rows: Vec<(String, i64, i64, i64, i64)> = if source == "event" {
-            sqlx::query_as(&format!(
-                "SELECT {group_col}, SUM(input_other), SUM(output),
-                        SUM(cache_read), SUM(cache_creation)
-                 FROM usage_event WHERE platform = ? AND ts >= ?
-                 GROUP BY {group_col} ORDER BY 2 DESC"
-            ))
-            .bind(Platform::Kimi.as_str())
-            .bind(marker)
-            .fetch_all(&self.pool)
-            .await?
-        } else {
-            let start = Self::range_start_date(marker);
-            sqlx::query_as(&format!(
-                "SELECT {group_col}, SUM(input_other), SUM(output),
-                        SUM(cache_read), SUM(cache_creation)
-                 FROM usage_daily WHERE platform = ? AND cli = ? AND date >= ?
-                 GROUP BY {group_col} ORDER BY 2 DESC"
-            ))
-            .bind(Platform::Kimi.as_str())
-            .bind(KIMI_CLI)
-            .bind(start)
-            .fetch_all(&self.pool)
-            .await?
-        };
-        Ok(rows
-            .into_iter()
-            .map(|(key, a, b, c, d)| UsageGroup {
-                key,
-                totals: Self::with_estimated_cost(UsageTotals::new(a, b, c, d)),
-            })
-            .collect())
+        Ok(crate::usage::query::summary(&self.pool, Some(Platform::Kimi), range).await?)
     }
 
     pub async fn usage_by_project(&self, range: UsageRange) -> Result<Vec<UsageGroup>, KimiError> {
-        self.group_by(range, GroupBy::Project).await
+        Ok(crate::usage::query::usage_by_project(&self.pool, Some(Platform::Kimi), range).await?)
     }
 
     pub async fn usage_by_model(&self, range: UsageRange) -> Result<Vec<UsageGroup>, KimiError> {
-        self.group_by(range, GroupBy::Model).await
+        Ok(crate::usage::query::usage_by_model(&self.pool, Some(Platform::Kimi), range).await?)
     }
 
-    /// 用量趋势时间序列（M1 趋势图）：
-    /// Day / Last5Hours 按小时分桶（事件表，本地时区），Week / Month 按日分桶（预聚合表）
+    /// 用量趋势时间序列（Day / Last5Hours 按小时、Week / Month 按日分桶）
     pub async fn usage_series(&self, range: UsageRange) -> Result<UsageSeries, KimiError> {
-        let rows: Vec<(String, i64, i64, i64, i64)> = match range {
-            UsageRange::Day | UsageRange::Last5Hours => {
-                let marker = match range {
-                    UsageRange::Day => Self::local_midnight_ms(),
-                    UsageRange::Last5Hours => Utc::now().timestamp_millis() - 5 * 3600 * 1000,
-                    _ => unreachable!(),
-                };
-                sqlx::query_as(
-                    "SELECT strftime('%H:00', ts / 1000, 'unixepoch', 'localtime') AS bucket,
-                            SUM(input_other), SUM(output), SUM(cache_read), SUM(cache_creation)
-                     FROM usage_event WHERE platform = ? AND ts >= ?
-                     GROUP BY bucket ORDER BY bucket",
-                )
-                .bind(Platform::Kimi.as_str())
-                .bind(marker)
-                .fetch_all(&self.pool)
-                .await?
-            }
-            UsageRange::Week | UsageRange::Month => {
-                let (_, kind) = Self::range_source(range);
-                let start = Self::range_start_date(kind);
-                sqlx::query_as(
-                    "SELECT date AS bucket,
-                            SUM(input_other), SUM(output), SUM(cache_read), SUM(cache_creation)
-                     FROM usage_daily WHERE platform = ? AND cli = ? AND date >= ?
-                     GROUP BY date ORDER BY date",
-                )
-                .bind(Platform::Kimi.as_str())
-                .bind(KIMI_CLI)
-                .bind(start)
-                .fetch_all(&self.pool)
-                .await?
-            }
-        };
-        Ok(UsageSeries {
-            range,
-            points: rows
-                .into_iter()
-                .map(|(bucket, a, b, c, d)| UsagePoint {
-                    bucket,
-                    totals: Self::with_estimated_cost(UsageTotals::new(a, b, c, d)),
-                })
-                .collect(),
-        })
-    }
-
-    /// 今日零点（本地时区）的 Unix 毫秒时间戳；极端情况下回退为当前时刻（宁可少算，不错算昨日）
-    fn local_midnight_ms() -> i64 {
-        Local::now()
-            .date_naive()
-            .and_hms_opt(0, 0, 0)
-            .and_then(|dt| Local.from_local_datetime(&dt).single())
-            .map(|dt| dt.timestamp_millis())
-            .unwrap_or_else(|| Utc::now().timestamp_millis())
-    }
-
-    pub async fn account_get(&self) -> Result<Option<KimiAccountRow>, KimiError> {
-        let row: Option<(String, String, String, i64)> = sqlx::query_as(
-            "SELECT name, api_base, credential_ref, enabled FROM kimi_account WHERE id = 1",
-        )
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(
-            row.map(|(name, api_base, credential_ref, enabled)| KimiAccountRow {
-                name,
-                api_base,
-                credential_ref,
-                enabled: enabled != 0,
-            }),
-        )
-    }
-
-    pub async fn account_set(
-        &self,
-        name: &str,
-        api_base: &str,
-        credential_ref: &str,
-        enabled: bool,
-    ) -> Result<(), KimiError> {
-        sqlx::query(
-            "INSERT INTO kimi_account (id, name, api_base, credential_ref, enabled)
-             VALUES (1, ?, ?, ?, ?)
-             ON CONFLICT(id) DO UPDATE SET
-                 name = excluded.name, api_base = excluded.api_base,
-                 credential_ref = excluded.credential_ref, enabled = excluded.enabled",
-        )
-        .bind(name)
-        .bind(api_base)
-        .bind(credential_ref)
-        .bind(enabled as i64)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    pub async fn save_balance(&self, balance: &KimiBalance) -> Result<(), KimiError> {
-        sqlx::query(
-            "INSERT INTO kimi_balance_snapshot (available, voucher, cash, fetched_at)
-             VALUES (?, ?, ?, ?)",
-        )
-        .bind(balance.available)
-        .bind(balance.voucher)
-        .bind(balance.cash)
-        .bind(&balance.fetched_at)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    pub async fn latest_balance(&self) -> Result<Option<KimiBalance>, KimiError> {
-        let row: Option<(f64, f64, f64, String)> = sqlx::query_as(
-            "SELECT available, voucher, cash, fetched_at
-             FROM kimi_balance_snapshot ORDER BY id DESC LIMIT 1",
-        )
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(
-            row.map(|(available, voucher, cash, fetched_at)| KimiBalance {
-                available,
-                voucher,
-                cash,
-                fetched_at,
-            }),
-        )
+        Ok(crate::usage::query::usage_series(&self.pool, Some(Platform::Kimi), range).await?)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
+    use chrono::{Local, TimeZone};
     use std::io::Write;
 
     async fn temp_store() -> (tempfile::TempDir, KimiStore) {
@@ -800,38 +544,5 @@ mod tests {
         // 月末桶即今天（本地日期）
         let today = Local::now().format("%Y-%m-%d").to_string();
         assert_eq!(month.points.last().unwrap().bucket, today);
-    }
-
-    #[tokio::test]
-    async fn account_roundtrip_and_balance_snapshot() {
-        let (tmp, store) = temp_store().await;
-        let _ = tmp;
-        assert!(store.account_get().await.unwrap().is_none());
-
-        store
-            .account_set("主账号", "https://api.moonshot.cn", "kimi-key", true)
-            .await
-            .unwrap();
-        let row = store.account_get().await.unwrap().unwrap();
-        assert_eq!(row.name, "主账号");
-        assert_eq!(row.credential_ref, "kimi-key");
-        assert!(row.enabled);
-
-        store
-            .account_set("主账号", "https://api.moonshot.cn", "kimi-key", false)
-            .await
-            .unwrap();
-        let row = store.account_get().await.unwrap().unwrap();
-        assert!(!row.enabled);
-
-        assert!(store.latest_balance().await.unwrap().is_none());
-        let balance = KimiBalance {
-            available: 10.5,
-            voucher: 2.0,
-            cash: 8.5,
-            fetched_at: "2026-01-01T00:00:00Z".to_string(),
-        };
-        store.save_balance(&balance).await.unwrap();
-        assert_eq!(store.latest_balance().await.unwrap(), Some(balance));
     }
 }
