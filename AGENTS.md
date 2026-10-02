@@ -28,8 +28,9 @@ apps/
                           #   sidecar.rs（mihomo 进程管理，待落地）、binaries/（sidecar 二进制）
   hub/                    # 中枢服务 toogl-hub（axum + tokio，跑在一体机 Linux 上，无界面，阶段二）
 crates/
-  core/                   # 共享核心 toogl-core：models / adapters / datasource / keystore / mihomo / kimicode
-                          #   （mimocode / omp 多平台日志解析待落地，随 S1-4）
+  core/                   # 共享核心 toogl-core：models / adapters（kimi/deepseek/mimo 配额适配器）/
+                          #   datasource / keystore / mihomo / kimicode / mimocode / omp（三个日志 parser）/
+                          #   usage（聚合查询、配额刷新、账户配置的编排层）
                           #   migrations/（SQLite schema，由 src/db.rs 按版本号迁移执行）
 packages/
   core-types/             # @toogl/core-types：TS 类型，ts-rs 从 Rust models 生成
@@ -78,7 +79,7 @@ cargo test -p toogl-core -- --ignored keyring_real_roundtrip   # 真实系统钥
 ## 测试策略
 
 - **Rust（主力）**：`cargo test --workspace`。日志解析器（M1 心脏）用脱敏 wire.jsonl fixture 驱动单元测试，覆盖增量偏移与聚合边界；HTTP 适配器用 wiremock mock server 测错误路径（401/超时/字段缺失）。`#[ignore]` 标注依赖真实系统能力的测试（如 keyring 冒烟），手动执行。
-- **前端**：Vitest 测关键 store（kimi/proxy/settings），组件测试从简，不写脆弱快照测试。
+- **前端**：Vitest 测关键 store（usage/proxy/settings），组件测试从简，不写脆弱快照测试。
 - **e2e**：tauri-driver + WebdriverIO，只覆盖 3 条核心链路（启动见数据 / 切换节点 / 系统代理开关）。
 - **CI**（`.github/workflows/ci.yml`，windows-latest）：`pnpm lint` + `format:check`；`cargo fmt --check` + `clippy -D warnings` + `cargo test` + bindings 一致性校验；最后 `tauri build`。
 - 每里程碑按《02-开发计划》第 4 节验收标准过真实环境。
@@ -93,8 +94,9 @@ cargo test -p toogl-core -- --ignored keyring_real_roundtrip   # 真实系统钥
 
 ## 当前状态
 
-阶段一 S1-2 已完成（脚手架 S1-1 + Kimi 统计 M1 前后端全链路）：
+阶段一 S1-4 已完成（脚手架 S1-1 + Kimi 统计 S1-2 + M1 多平台用量泛化前后端全链路）：
 
-- 已就绪：monorepo 脚手架与 CI、keystore 命令（keyring 显式 windows-native，SERVICE_NAME 统一在 `keystore::KEYRING_SERVICE_NAME`）、Rust 侧统一 schema 迁移（`crates/core/migrations/` 0001 platform/usage_snapshot + 0002 kimi 五表，由 `db::migrate` 幂等执行；tauri-plugin-sql 已移除）、`crates/core/kimicode`（wire.jsonl 扫描：单文件容错 + size/mtime 变化触发幂等重扫 + 按日预聚合，真实日志验证约 1360 文件 / 27,000+ 事件 / 0 坏行；扫描互斥锁防并发双计）、Kimi 余额适配器（reqwest client 静态复用，wiremock 覆盖 401/超时/字段缺失）、Tauri commands（统一返回结构化 `CommandError`；Kimi 模块初始化失败降级为 unavailable 不 panic；余额刷新编排在 `kimicode::refresh_balance`）、前端路由 + Kimi 页 / Dashboard / Settings、ts-rs bindings 链路（含 index.ts 完整性测试）、Vitest 单测（format / kimi store / errors 适配）。
-- 骨架待落地：mihomo 客户端与 sidecar（S1-3）、S1-4 AI 用量聚合多平台泛化（mimocode/omp parser、配额适配器、前端泛化）、DirectSource 聚合调度（随 S1-4）、HubSource（S2-2，服务阶段二 M3/M4）、hub API /usage /config /control（S2-1，现仅 /api/v1/health）。
+- 已就绪：monorepo 脚手架与 CI、keystore 命令（keyring 显式 windows-native，SERVICE_NAME 统一在 `keystore::KEYRING_SERVICE_NAME`）、Rust 侧统一 schema 迁移（`crates/core/migrations/`，泛化后事件/日聚合/游标表带 `platform`+`cli` 维度，另有 quota_snapshot / platform_account，由 `db::migrate` 幂等执行；tauri-plugin-sql 已移除）、三个日志 parser（`crates/core/kimicode` wire.jsonl、`mimocode` mimocode.db 只读、`omp` JSONL，统一归一化为 UsageEvent，共享增量游标 + 按日预聚合框架；单文件容错 + size/mtime 变化触发幂等重扫；扫描互斥锁防并发双计）、`crates/core/usage/` 编排层（聚合查询 query / 配额刷新 quota / 账户配置 account）、三个配额适配器（`adapters/kimi.rs` 余额 + 非官方 coding usages best-effort，`deepseek.rs` 官方 /user/balance，`mimo.rs` 手录总额 + 本地日志推算，纯本地不发请求；wiremock 覆盖 401/超时/字段缺失）、泛化 Tauri commands（`commands/usage.rs`：scan_usage_logs / usage_summary / usage_by_project / usage_by_model / usage_series / quota_refresh / quota_latest / platform_account_get / platform_account_set，统一返回结构化 `CommandError`，单平台失败不影响其他平台）、前端多平台用量页（`views/Usage.vue`：平台 Tab 总览/Kimi/MiMo/omp/DeepSeek + 总览卡片墙 + 趋势图 + 项目/模型分布 + `components/QuotaCard.vue` 配额卡片含未配置/不可用降级态；`stores/usage.ts` 按平台组织状态；/kimi 旧路径重定向到 /usage）、Dashboard 多平台摘要卡、设置页平台分区（Kimi/DeepSeek key + api_base、MiMo 手录套餐总额/周期、日志目录覆盖）、ts-rs bindings 链路（含 index.ts 完整性测试）、Vitest 单测（format / usage store / errors 适配，32 项全绿）。
+- 骨架待落地：mihomo 客户端与 sidecar（S1-3）、HubSource（S2-2，服务阶段二 M3/M4）、hub API /usage /config /control（S2-1，现仅 /api/v1/health）。
 - 已知占位：用量估值单价表全 0（estimated_cost 恒 0，待官方价格确认，将迁移为 M6 可配置项）；MiMo 配额无公开 API，只能手录总额 + 本地日志推算消耗。
+- S1-4 人工验收待补：DeepSeek 真实 key 未购买未实测；MiMo 真实 mimocode.db 本机不存在未经实测；Kimi `/coding/v1/usages` 响应格式为推测（字段缺失时宽松降级，不拖垮余额主数据源）。

@@ -11,13 +11,14 @@ export const router = createRouter({
       component: () => import('@/views/Dashboard.vue'),
       meta: { title: 'Dashboard' },
     },
-    // Kimi 页含 ECharts，懒加载以拆出独立 chunk
+    // AI 用量页含 ECharts，懒加载以拆出独立 chunk；/kimi 为 S1-2 旧路径，重定向保留兼容
     {
-      path: '/kimi',
-      name: 'kimi',
-      component: () => import('@/views/Kimi.vue'),
-      meta: { title: 'Kimi 统计' },
+      path: '/usage',
+      name: 'usage',
+      component: () => import('@/views/Usage.vue'),
+      meta: { title: 'AI 用量' },
     },
+    { path: '/kimi', redirect: '/usage' },
     {
       path: '/server',
       name: 'server',

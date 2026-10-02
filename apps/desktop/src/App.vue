@@ -9,7 +9,7 @@ const route = useRoute()
 /** 左侧导航；未交付模块置灰并标注里程碑 */
 const navItems = [
   { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard, enabled: true },
-  { to: '/kimi', label: 'Kimi 统计', icon: ChartLine, enabled: true },
+  { to: '/usage', label: 'AI 用量', icon: ChartLine, enabled: true },
   { to: '/server', label: '服务器', icon: Server, enabled: false, milestone: '阶段二' },
   { to: '/nas', label: 'NAS', icon: HardDrive, enabled: false, milestone: '阶段二' },
   { to: '/proxy', label: '魔法工具', icon: WandSparkles, enabled: false, milestone: 'S1-3' },
