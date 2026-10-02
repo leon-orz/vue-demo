@@ -8,4 +8,6 @@ pub mod db;
 pub mod keystore;
 pub mod kimicode;
 pub mod mihomo;
+pub mod mimocode;
 pub mod models;
+pub mod omp;
