@@ -6,7 +6,7 @@ pub mod kimi;
 
 use thiserror::Error;
 
-use crate::models::{CommandError, Credential, UsageSnapshot};
+use crate::models::{CommandError, Credential, QuotaSnapshot};
 
 #[derive(Debug, Error)]
 pub enum AdapterError {
@@ -34,9 +34,11 @@ impl From<AdapterError> for CommandError {
 // 项目内部 trait，不涉及跨 crate 的 auto trait 兼容问题，允许 async fn
 #[allow(async_fn_in_trait)]
 pub trait UsageAdapter: Send + Sync {
-    /// 平台类型标识，对应 platform.type 字段（如 "kimi" / "deepseek" / "mimo"）
+    /// 平台标识，对应 platform_account.platform / quota_snapshot.platform 列
+    /// （"kimi" / "deepseek" / "mimo"，见 models::Platform）
     fn platform_type(&self) -> &'static str;
 
+    /// 拉取配额/余额并归一化为 QuotaSnapshot（统一落 quota_snapshot 表）
     async fn fetch(&self, base_url: &str, cred: &Credential)
-        -> Result<UsageSnapshot, AdapterError>;
+        -> Result<QuotaSnapshot, AdapterError>;
 }

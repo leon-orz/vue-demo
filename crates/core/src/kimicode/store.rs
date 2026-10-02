@@ -10,10 +10,10 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePool};
 
 use super::pricing;
 use super::scanner::{self, FileCursor, ScanOutput};
-use super::KimiError;
+use super::{KimiError, KIMI_CLI};
 use crate::models::{
-    KimiBalance, KimiScanReport, KimiUsageGroup, KimiUsagePoint, KimiUsageRange, KimiUsageSeries,
-    KimiUsageSummary, KimiUsageTotals,
+    KimiBalance, Platform, ScanReport, UsageGroup, UsagePoint, UsageRange, UsageSeries,
+    UsageSummary, UsageTotals,
 };
 
 /// 账户表行（内部类型；对前端暴露的是 models::KimiAccountInfo，has_credential 由命令层补充）
@@ -75,8 +75,10 @@ impl KimiStore {
     }
 
     async fn load_cursors(&self) -> Result<HashMap<PathBuf, FileCursor>, KimiError> {
+        // 只取本平台的游标（log_file 为多平台共用表，按 platform 隔离）
         let rows: Vec<(String, i64, i64)> =
-            sqlx::query_as("SELECT path, offset, mtime FROM kimi_log_file")
+            sqlx::query_as("SELECT path, offset, mtime FROM log_file WHERE platform = ?")
+                .bind(Platform::Kimi.as_str())
                 .fetch_all(&self.pool)
                 .await?;
         Ok(rows
@@ -95,28 +97,29 @@ impl KimiStore {
 
     /// 扫描并入库：重扫/续读 → 写事件 → 按需重算日聚合，全程幂等。
     /// 并发调用经互斥锁排队，保证不会双计入库。
-    pub async fn scan_and_record(&self, sessions_root: &Path) -> Result<KimiScanReport, KimiError> {
+    pub async fn scan_and_record(&self, sessions_root: &Path) -> Result<ScanReport, KimiError> {
         let _guard = self.scan_lock.lock().await;
         let cursors = self.load_cursors().await?;
         let output = scanner::scan(sessions_root, &cursors)?;
         self.record(output).await
     }
 
-    async fn record(&self, output: ScanOutput) -> Result<KimiScanReport, KimiError> {
+    async fn record(&self, output: ScanOutput) -> Result<ScanReport, KimiError> {
         let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
         let mut events_added: u64 = 0;
         let has_rescan = output.files.iter().any(|f| f.truncated);
         let mut tx = self.pool.begin().await?;
         for file in &output.files {
             let path = file.path.to_string_lossy();
-            // upsert 游标行
+            // upsert 游标行（platform + path 联合唯一）
             sqlx::query(
-                "INSERT INTO kimi_log_file (path, offset, size, mtime, last_scanned_at)
-                 VALUES (?, ?, ?, ?, ?)
-                 ON CONFLICT(path) DO UPDATE SET
+                "INSERT INTO log_file (platform, path, offset, size, mtime, last_scanned_at)
+                 VALUES (?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(platform, path) DO UPDATE SET
                      offset = excluded.offset, size = excluded.size,
                      mtime = excluded.mtime, last_scanned_at = excluded.last_scanned_at",
             )
+            .bind(Platform::Kimi.as_str())
             .bind(path.as_ref())
             .bind(file.new_offset as i64)
             .bind(file.size as i64)
@@ -125,24 +128,27 @@ impl KimiStore {
             .execute(&mut *tx)
             .await?;
             let (log_file_id,): (i64,) =
-                sqlx::query_as("SELECT id FROM kimi_log_file WHERE path = ?")
+                sqlx::query_as("SELECT id FROM log_file WHERE platform = ? AND path = ?")
+                    .bind(Platform::Kimi.as_str())
                     .bind(path.as_ref())
                     .fetch_one(&mut *tx)
                     .await?;
             if file.truncated {
                 // 文件被截断/重建/改写：整批删除旧事件后按重扫结果重建
-                sqlx::query("DELETE FROM kimi_usage_event WHERE log_file_id = ?")
+                sqlx::query("DELETE FROM usage_event WHERE log_file_id = ?")
                     .bind(log_file_id)
                     .execute(&mut *tx)
                     .await?;
             }
             for e in &file.events {
                 sqlx::query(
-                    "INSERT INTO kimi_usage_event
-                         (log_file_id, ts, session_id, project, model,
-                          input_other, output, cache_read, cache_creation)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO usage_event
+                         (platform, cli, log_file_id, ts, session_id, project, model,
+                          input_other, output, cache_read, cache_creation, cost)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 )
+                .bind(e.platform.as_str())
+                .bind(&e.cli)
                 .bind(log_file_id)
                 .bind(e.ts)
                 .bind(&e.session_id)
@@ -152,6 +158,7 @@ impl KimiStore {
                 .bind(e.output)
                 .bind(e.cache_read)
                 .bind(e.cache_creation)
+                .bind(e.cost)
                 .execute(&mut *tx)
                 .await?;
                 events_added += 1;
@@ -159,24 +166,30 @@ impl KimiStore {
         }
         // 本次扫描无新事件且无重扫时跳过日聚合全量重建（结果必然相同）
         if events_added > 0 || has_rescan {
-            // 幂等重算日聚合表（个人量级全量重算足够快；页面查询只打聚合表）
-            sqlx::query("DELETE FROM kimi_usage_daily")
+            // 幂等重算本平台日聚合（只删重建 platform+cli 本行组，不动其他平台数据；
+            // 个人量级全量重算足够快，页面查询只打聚合表）
+            sqlx::query("DELETE FROM usage_daily WHERE platform = ? AND cli = ?")
+                .bind(Platform::Kimi.as_str())
+                .bind(KIMI_CLI)
                 .execute(&mut *tx)
                 .await?;
             sqlx::query(
-                "INSERT INTO kimi_usage_daily (date, project, model,
+                "INSERT INTO usage_daily (date, platform, cli, project, model,
                      input_other, output, cache_read, cache_creation)
-                 SELECT date(ts / 1000, 'unixepoch', 'localtime'), project, model,
+                 SELECT date(ts / 1000, 'unixepoch', 'localtime'), platform, cli, project, model,
                         SUM(input_other), SUM(output), SUM(cache_read), SUM(cache_creation)
-                 FROM kimi_usage_event
-                 GROUP BY 1, 2, 3",
+                 FROM usage_event
+                 WHERE platform = ? AND cli = ?
+                 GROUP BY 1, 2, 3, 4, 5",
             )
+            .bind(Platform::Kimi.as_str())
+            .bind(KIMI_CLI)
             .execute(&mut *tx)
             .await?;
         }
         tx.commit().await?;
 
-        Ok(KimiScanReport {
+        Ok(ScanReport {
             files_found: output.stats.files_found,
             files_rescanned: output.stats.files_rescanned,
             files_failed: output.stats.files_failed,
@@ -187,15 +200,15 @@ impl KimiStore {
     }
 
     /// 各范围的 SQL 来源：天/周/月打预聚合表（按起始日过滤），最近 5 小时走事件表
-    fn range_source(range: KimiUsageRange) -> (String, i64) {
+    fn range_source(range: UsageRange) -> (String, i64) {
         match range {
-            KimiUsageRange::Last5Hours => {
+            UsageRange::Last5Hours => {
                 let cutoff = Utc::now().timestamp_millis() - 5 * 3600 * 1000;
                 ("event".to_string(), cutoff)
             }
-            KimiUsageRange::Day => ("daily".to_string(), 0),
-            KimiUsageRange::Week => ("daily".to_string(), 1),
-            KimiUsageRange::Month => ("daily".to_string(), 2),
+            UsageRange::Day => ("daily".to_string(), 0),
+            UsageRange::Week => ("daily".to_string(), 1),
+            UsageRange::Month => ("daily".to_string(), 2),
         }
     }
 
@@ -212,7 +225,7 @@ impl KimiStore {
     }
 
     /// 填充估值金额（单价表在业务层 kimicode::pricing，数据模型不反向依赖）
-    fn with_estimated_cost(mut totals: KimiUsageTotals) -> KimiUsageTotals {
+    fn with_estimated_cost(mut totals: UsageTotals) -> UsageTotals {
         totals.estimated_cost = pricing::estimate_cost(
             totals.input_other,
             totals.output,
@@ -222,14 +235,16 @@ impl KimiStore {
         totals
     }
 
-    async fn totals_where(&self, range: KimiUsageRange) -> Result<KimiUsageTotals, KimiError> {
+    async fn totals_where(&self, range: UsageRange) -> Result<UsageTotals, KimiError> {
         let (source, marker) = Self::range_source(range);
+        // 多平台共用表：本 store 只查 kimi 平台数据
         let row: (i64, i64, i64, i64) = if source == "event" {
             sqlx::query_as(
                 "SELECT COALESCE(SUM(input_other),0), COALESCE(SUM(output),0),
                         COALESCE(SUM(cache_read),0), COALESCE(SUM(cache_creation),0)
-                 FROM kimi_usage_event WHERE ts >= ?",
+                 FROM usage_event WHERE platform = ? AND ts >= ?",
             )
+            .bind(Platform::Kimi.as_str())
             .bind(marker)
             .fetch_one(&self.pool)
             .await?
@@ -238,19 +253,21 @@ impl KimiStore {
             sqlx::query_as(
                 "SELECT COALESCE(SUM(input_other),0), COALESCE(SUM(output),0),
                         COALESCE(SUM(cache_read),0), COALESCE(SUM(cache_creation),0)
-                 FROM kimi_usage_daily WHERE date >= ?",
+                 FROM usage_daily WHERE platform = ? AND cli = ? AND date >= ?",
             )
+            .bind(Platform::Kimi.as_str())
+            .bind(KIMI_CLI)
             .bind(start)
             .fetch_one(&self.pool)
             .await?
         };
-        Ok(Self::with_estimated_cost(KimiUsageTotals::new(
+        Ok(Self::with_estimated_cost(UsageTotals::new(
             row.0, row.1, row.2, row.3,
         )))
     }
 
-    pub async fn summary(&self, range: KimiUsageRange) -> Result<KimiUsageSummary, KimiError> {
-        Ok(KimiUsageSummary {
+    pub async fn summary(&self, range: UsageRange) -> Result<UsageSummary, KimiError> {
+        Ok(UsageSummary {
             range,
             totals: self.totals_where(range).await?,
         })
@@ -259,18 +276,19 @@ impl KimiStore {
     /// 按项目 / 按模型分组
     async fn group_by(
         &self,
-        range: KimiUsageRange,
+        range: UsageRange,
         group: GroupBy,
-    ) -> Result<Vec<KimiUsageGroup>, KimiError> {
+    ) -> Result<Vec<UsageGroup>, KimiError> {
         let group_col = group.column();
         let (source, marker) = Self::range_source(range);
         let rows: Vec<(String, i64, i64, i64, i64)> = if source == "event" {
             sqlx::query_as(&format!(
                 "SELECT {group_col}, SUM(input_other), SUM(output),
                         SUM(cache_read), SUM(cache_creation)
-                 FROM kimi_usage_event WHERE ts >= ?
+                 FROM usage_event WHERE platform = ? AND ts >= ?
                  GROUP BY {group_col} ORDER BY 2 DESC"
             ))
+            .bind(Platform::Kimi.as_str())
             .bind(marker)
             .fetch_all(&self.pool)
             .await?
@@ -279,77 +297,76 @@ impl KimiStore {
             sqlx::query_as(&format!(
                 "SELECT {group_col}, SUM(input_other), SUM(output),
                         SUM(cache_read), SUM(cache_creation)
-                 FROM kimi_usage_daily WHERE date >= ?
+                 FROM usage_daily WHERE platform = ? AND cli = ? AND date >= ?
                  GROUP BY {group_col} ORDER BY 2 DESC"
             ))
+            .bind(Platform::Kimi.as_str())
+            .bind(KIMI_CLI)
             .bind(start)
             .fetch_all(&self.pool)
             .await?
         };
         Ok(rows
             .into_iter()
-            .map(|(key, a, b, c, d)| KimiUsageGroup {
+            .map(|(key, a, b, c, d)| UsageGroup {
                 key,
-                totals: Self::with_estimated_cost(KimiUsageTotals::new(a, b, c, d)),
+                totals: Self::with_estimated_cost(UsageTotals::new(a, b, c, d)),
             })
             .collect())
     }
 
-    pub async fn usage_by_project(
-        &self,
-        range: KimiUsageRange,
-    ) -> Result<Vec<KimiUsageGroup>, KimiError> {
+    pub async fn usage_by_project(&self, range: UsageRange) -> Result<Vec<UsageGroup>, KimiError> {
         self.group_by(range, GroupBy::Project).await
     }
 
-    pub async fn usage_by_model(
-        &self,
-        range: KimiUsageRange,
-    ) -> Result<Vec<KimiUsageGroup>, KimiError> {
+    pub async fn usage_by_model(&self, range: UsageRange) -> Result<Vec<UsageGroup>, KimiError> {
         self.group_by(range, GroupBy::Model).await
     }
 
     /// 用量趋势时间序列（M1 趋势图）：
     /// Day / Last5Hours 按小时分桶（事件表，本地时区），Week / Month 按日分桶（预聚合表）
-    pub async fn usage_series(&self, range: KimiUsageRange) -> Result<KimiUsageSeries, KimiError> {
+    pub async fn usage_series(&self, range: UsageRange) -> Result<UsageSeries, KimiError> {
         let rows: Vec<(String, i64, i64, i64, i64)> = match range {
-            KimiUsageRange::Day | KimiUsageRange::Last5Hours => {
+            UsageRange::Day | UsageRange::Last5Hours => {
                 let marker = match range {
-                    KimiUsageRange::Day => Self::local_midnight_ms(),
-                    KimiUsageRange::Last5Hours => Utc::now().timestamp_millis() - 5 * 3600 * 1000,
+                    UsageRange::Day => Self::local_midnight_ms(),
+                    UsageRange::Last5Hours => Utc::now().timestamp_millis() - 5 * 3600 * 1000,
                     _ => unreachable!(),
                 };
                 sqlx::query_as(
                     "SELECT strftime('%H:00', ts / 1000, 'unixepoch', 'localtime') AS bucket,
                             SUM(input_other), SUM(output), SUM(cache_read), SUM(cache_creation)
-                     FROM kimi_usage_event WHERE ts >= ?
+                     FROM usage_event WHERE platform = ? AND ts >= ?
                      GROUP BY bucket ORDER BY bucket",
                 )
+                .bind(Platform::Kimi.as_str())
                 .bind(marker)
                 .fetch_all(&self.pool)
                 .await?
             }
-            KimiUsageRange::Week | KimiUsageRange::Month => {
+            UsageRange::Week | UsageRange::Month => {
                 let (_, kind) = Self::range_source(range);
                 let start = Self::range_start_date(kind);
                 sqlx::query_as(
                     "SELECT date AS bucket,
                             SUM(input_other), SUM(output), SUM(cache_read), SUM(cache_creation)
-                     FROM kimi_usage_daily WHERE date >= ?
+                     FROM usage_daily WHERE platform = ? AND cli = ? AND date >= ?
                      GROUP BY date ORDER BY date",
                 )
+                .bind(Platform::Kimi.as_str())
+                .bind(KIMI_CLI)
                 .bind(start)
                 .fetch_all(&self.pool)
                 .await?
             }
         };
-        Ok(KimiUsageSeries {
+        Ok(UsageSeries {
             range,
             points: rows
                 .into_iter()
-                .map(|(bucket, a, b, c, d)| KimiUsagePoint {
+                .map(|(bucket, a, b, c, d)| UsagePoint {
                     bucket,
-                    totals: Self::with_estimated_cost(KimiUsageTotals::new(a, b, c, d)),
+                    totals: Self::with_estimated_cost(UsageTotals::new(a, b, c, d)),
                 })
                 .collect(),
         })
@@ -498,7 +515,7 @@ mod tests {
         assert_eq!(report.files_found, 2);
         assert_eq!(report.events_added, 3);
 
-        let summary = store.summary(KimiUsageRange::Day).await.unwrap();
+        let summary = store.summary(UsageRange::Day).await.unwrap();
         assert_eq!(summary.totals.input_other, 350);
         assert_eq!(summary.totals.output, 35);
         assert_eq!(summary.totals.cache_read, 950);
@@ -508,7 +525,7 @@ mod tests {
         // 再扫一次：无新增（增量游标生效，事件不重复）
         let report2 = store.scan_and_record(tmp.path()).await.unwrap();
         assert_eq!(report2.events_added, 0);
-        let summary2 = store.summary(KimiUsageRange::Day).await.unwrap();
+        let summary2 = store.summary(UsageRange::Day).await.unwrap();
         assert_eq!(summary2.totals.input_other, 350);
     }
 
@@ -535,14 +552,14 @@ mod tests {
         let report = store.scan_and_record(tmp.path()).await.unwrap();
         assert_eq!(report.events_added, 2);
         assert_eq!(report.files_rescanned, 1);
-        let summary = store.summary(KimiUsageRange::Day).await.unwrap();
+        let summary = store.summary(UsageRange::Day).await.unwrap();
         assert_eq!(summary.totals.input_other, 30);
 
         // 截断重建 → 旧事件整批替换，不双计
         std::fs::write(&wire, format!("{}\n", usage_line(now, "m1", 5, 5, 5))).unwrap();
         let report = store.scan_and_record(tmp.path()).await.unwrap();
         assert_eq!(report.files_rescanned, 1);
-        let summary = store.summary(KimiUsageRange::Day).await.unwrap();
+        let summary = store.summary(UsageRange::Day).await.unwrap();
         assert_eq!(summary.totals.input_other, 5);
         assert_eq!(summary.totals.output, 5);
     }
@@ -571,7 +588,7 @@ mod tests {
         let (r1, r2) = (r1.unwrap(), r2.unwrap());
         assert_eq!(r1.events_added + r2.events_added, 3);
 
-        let summary = store.summary(KimiUsageRange::Day).await.unwrap();
+        let summary = store.summary(UsageRange::Day).await.unwrap();
         assert_eq!(summary.totals.input_other, 60);
         assert_eq!(summary.totals.output, 6);
     }
@@ -591,14 +608,14 @@ mod tests {
         assert_eq!(report.events_added, 1);
 
         // 破坏日聚合表后做无增量扫描：不应触发重算（表保持被破坏状态）
-        sqlx::query("DELETE FROM kimi_usage_daily")
+        sqlx::query("DELETE FROM usage_daily")
             .execute(&store.pool)
             .await
             .unwrap();
         let report = store.scan_and_record(tmp.path()).await.unwrap();
         assert_eq!(report.events_added, 0);
         assert_eq!(report.files_rescanned, 0);
-        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM kimi_usage_daily")
+        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM usage_daily")
             .fetch_one(&store.pool)
             .await
             .unwrap();
@@ -637,14 +654,14 @@ mod tests {
         assert_eq!(report.files_found, 2);
         assert_eq!(report.files_failed, 1);
         assert_eq!(report.events_added, 1);
-        let summary = store.summary(KimiUsageRange::Day).await.unwrap();
+        let summary = store.summary(UsageRange::Day).await.unwrap();
         assert_eq!(summary.totals.input_other, 1);
 
         // 释放占用后重扫：失败文件自然补回
         drop(lock);
         let report = store.scan_and_record(tmp.path()).await.unwrap();
         assert_eq!(report.files_failed, 0);
-        let summary = store.summary(KimiUsageRange::Day).await.unwrap();
+        let summary = store.summary(UsageRange::Day).await.unwrap();
         assert_eq!(summary.totals.input_other, 3);
     }
 
@@ -670,11 +687,11 @@ mod tests {
         store.scan_and_record(tmp.path()).await.unwrap();
 
         // 最近 5 小时只含 recent
-        let last5 = store.summary(KimiUsageRange::Last5Hours).await.unwrap();
+        let last5 = store.summary(UsageRange::Last5Hours).await.unwrap();
         assert_eq!(last5.totals.input_other, 100);
 
         // 当月范围：月初 1 号 0~6 点跑测试时 six_hours_ago 落在上月，按边界分支断言
-        let month = store.summary(KimiUsageRange::Month).await.unwrap();
+        let month = store.summary(UsageRange::Month).await.unwrap();
         let same_month = chrono::Local
             .timestamp_millis_opt(six_hours_ago)
             .single()
@@ -683,7 +700,7 @@ mod tests {
         let expected = if same_month { 300 } else { 100 };
         assert_eq!(month.totals.input_other, expected);
 
-        let day = store.summary(KimiUsageRange::Day).await.unwrap();
+        let day = store.summary(UsageRange::Day).await.unwrap();
         let same_day = chrono::Local
             .timestamp_millis_opt(six_hours_ago)
             .single()
@@ -716,7 +733,7 @@ mod tests {
         );
         store.scan_and_record(tmp.path()).await.unwrap();
 
-        let by_project = store.usage_by_project(KimiUsageRange::Day).await.unwrap();
+        let by_project = store.usage_by_project(UsageRange::Day).await.unwrap();
         assert_eq!(by_project.len(), 2);
         // 按 input_other 降序：blog(200) 在前，app(150) 在后
         assert_eq!(by_project[0].key, "blog");
@@ -724,7 +741,7 @@ mod tests {
         assert_eq!(by_project[1].key, "app");
         assert_eq!(by_project[1].totals.input_other, 150);
 
-        let by_model = store.usage_by_model(KimiUsageRange::Day).await.unwrap();
+        let by_model = store.usage_by_model(UsageRange::Day).await.unwrap();
         assert_eq!(by_model.len(), 2);
         assert_eq!(by_model[0].key, "m1");
         assert_eq!(by_model[0].totals.input_other, 300);
@@ -746,7 +763,7 @@ mod tests {
             &[usage_line(now, "m1", 0, 42, 0)],
         );
         store.scan_and_record(tmp.path()).await.unwrap();
-        let summary = store.summary(KimiUsageRange::Day).await.unwrap();
+        let summary = store.summary(UsageRange::Day).await.unwrap();
         assert_eq!(summary.totals.cache_hit_rate, None);
         assert_eq!(summary.totals.output, 42);
     }
@@ -768,7 +785,7 @@ mod tests {
         );
         store.scan_and_record(tmp.path()).await.unwrap();
 
-        let day = store.usage_series(KimiUsageRange::Day).await.unwrap();
+        let day = store.usage_series(UsageRange::Day).await.unwrap();
         let same_day = chrono::Local
             .timestamp_millis_opt(now - 2 * 3600 * 1000)
             .single()
@@ -778,7 +795,7 @@ mod tests {
         assert_eq!(day.points.len(), if same_day { 2 } else { 1 });
         assert!(day.points.iter().all(|p| p.bucket.len() == 5));
 
-        let month = store.usage_series(KimiUsageRange::Month).await.unwrap();
+        let month = store.usage_series(UsageRange::Month).await.unwrap();
         assert!(!month.points.is_empty());
         // 月末桶即今天（本地日期）
         let today = Local::now().format("%Y-%m-%d").to_string();

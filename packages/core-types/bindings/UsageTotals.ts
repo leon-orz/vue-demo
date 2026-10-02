@@ -4,7 +4,7 @@
  * 四类 token 的聚合结果 + 缓存命中率 + 估值金额。
  * 缓存命中率 = cache_read / (input_other + cache_read + cache_creation)，分母为 0 时为 null。
  */
-export type KimiUsageTotals = { input_other: number, output: number, cache_read: number, cache_creation: number, cache_hit_rate: number | null, 
+export type UsageTotals = { input_other: number, output: number, cache_read: number, cache_creation: number, cache_hit_rate: number | null, 
 /**
  * 按内置静态单价表估算的金额（元）。由查询层填充；单价未定，当前恒为 0（见 kimicode::pricing 的 TODO）
  */

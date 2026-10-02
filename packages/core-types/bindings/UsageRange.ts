@@ -3,4 +3,4 @@
 /**
  * 聚合时间范围（M1-05 / M1-06）
  */
-export type KimiUsageRange = "Day" | "Week" | "Month" | "Last5Hours";
+export type UsageRange = "Day" | "Week" | "Month" | "Last5Hours";

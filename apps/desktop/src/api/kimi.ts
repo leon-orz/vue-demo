@@ -3,34 +3,34 @@ import type {
   KimiAccountInfo,
   KimiAccountInput,
   KimiBalance,
-  KimiScanReport,
-  KimiUsageGroup,
-  KimiUsageRange,
-  KimiUsageSeries,
-  KimiUsageSummary,
+  ScanReport,
+  UsageGroup,
+  UsageRange,
+  UsageSeries,
+  UsageSummary,
 } from '@toogl/core-types'
 
 /** 与 src-tauri/src/commands/kimi.rs 一一对应；参数/返回类型一律来自 ts-rs 生成物 */
 
 /** 手动触发增量扫描（sessionsDir 留空走默认目录） */
-export function scanKimiLogs(sessionsDir?: string): Promise<KimiScanReport> {
+export function scanKimiLogs(sessionsDir?: string): Promise<ScanReport> {
   return invoke('scan_kimi_logs', { sessionsDir })
 }
 
-export function kimiUsageSummary(range: KimiUsageRange): Promise<KimiUsageSummary> {
+export function kimiUsageSummary(range: UsageRange): Promise<UsageSummary> {
   return invoke('kimi_usage_summary', { range })
 }
 
-export function kimiUsageByProject(range: KimiUsageRange): Promise<KimiUsageGroup[]> {
+export function kimiUsageByProject(range: UsageRange): Promise<UsageGroup[]> {
   return invoke('kimi_usage_by_project', { range })
 }
 
-export function kimiUsageByModel(range: KimiUsageRange): Promise<KimiUsageGroup[]> {
+export function kimiUsageByModel(range: UsageRange): Promise<UsageGroup[]> {
   return invoke('kimi_usage_by_model', { range })
 }
 
 /** 用量趋势时间序列（Day 按小时、Week/Month 按日） */
-export function kimiUsageSeries(range: KimiUsageRange): Promise<KimiUsageSeries> {
+export function kimiUsageSeries(range: UsageRange): Promise<UsageSeries> {
   return invoke('kimi_usage_series', { range })
 }
 

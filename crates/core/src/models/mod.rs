@@ -5,11 +5,11 @@ pub mod usage;
 
 pub use credential::Credential;
 pub use error::CommandError;
-pub use kimi::{
-    KimiAccountInfo, KimiAccountInput, KimiBalance, KimiScanReport, KimiUsageEvent, KimiUsageGroup,
-    KimiUsagePoint, KimiUsageRange, KimiUsageSeries, KimiUsageSummary, KimiUsageTotals,
+pub use kimi::{KimiAccountInfo, KimiAccountInput, KimiBalance};
+pub use usage::{
+    LogFileCursor, Platform, PlatformAccountInfo, PlatformAccountInput, QuotaSnapshot, ScanReport,
+    UsageEvent, UsageGroup, UsagePoint, UsageRange, UsageSeries, UsageSummary, UsageTotals,
 };
-pub use usage::{Currency, UsageSnapshot};
 
 #[cfg(test)]
 mod tests {

@@ -3,7 +3,7 @@
 
 use thiserror::Error;
 
-use crate::models::UsageSnapshot;
+use crate::models::QuotaSnapshot;
 
 #[derive(Debug, Error)]
 pub enum DataSourceError {
@@ -17,18 +17,18 @@ pub enum DataSourceError {
 
 #[allow(async_fn_in_trait)] // 项目内部 trait，同上
 pub trait DataSource: Send + Sync {
-    async fn fetch_all_usage(&self) -> Result<Vec<UsageSnapshot>, DataSourceError>;
+    async fn fetch_all_usage(&self) -> Result<Vec<QuotaSnapshot>, DataSourceError>;
 }
 
 /// 阶段一默认：客户端直连各平台
 pub struct DirectSource;
 
 impl DataSource for DirectSource {
-    async fn fetch_all_usage(&self) -> Result<Vec<UsageSnapshot>, DataSourceError> {
-        // TODO(S2-3)：遍历启用的 platform，调度对应适配器并发拉取（随 M2 落地）。
+    async fn fetch_all_usage(&self) -> Result<Vec<QuotaSnapshot>, DataSourceError> {
+        // TODO(S1-4)：遍历启用的 platform_account，调度对应适配器并发拉取。
         // 占位期间显式报错而非返回空 vec，避免把"未实现"误读为"无用量"
         Err(DataSourceError::NotImplemented(
-            "DirectSource 聚合调度（S2-3，随 M2 落地）",
+            "DirectSource 聚合调度（S1-4，随多平台配额适配器落地）",
         ))
     }
 }
@@ -39,7 +39,7 @@ pub struct HubSource {
 }
 
 impl DataSource for HubSource {
-    async fn fetch_all_usage(&self) -> Result<Vec<UsageSnapshot>, DataSourceError> {
+    async fn fetch_all_usage(&self) -> Result<Vec<QuotaSnapshot>, DataSourceError> {
         // TODO(S2-2)：GET {hub_base_url}/api/v1/usage
         Err(DataSourceError::HubUnreachable(self.hub_base_url.clone()))
     }

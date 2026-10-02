@@ -6,23 +6,23 @@ import * as api from '@/api/kimi'
 import type {
   KimiAccountInfo,
   KimiBalance,
-  KimiScanReport,
-  KimiUsageGroup,
-  KimiUsageRange,
-  KimiUsageSeries,
-  KimiUsageSummary,
+  ScanReport,
+  UsageGroup,
+  UsageRange,
+  UsageSeries,
+  UsageSummary,
 } from '@toogl/core-types'
 
 /** 趋势图可选范围（Last5Hours 不参与趋势切换） */
-export type TrendRange = Exclude<KimiUsageRange, 'Last5Hours'>
+export type TrendRange = Exclude<UsageRange, 'Last5Hours'>
 
 export const useKimiStore = defineStore('kimi', () => {
   /** 各范围汇总（Day / Week / Month / Last5Hours），数据来自 SQLite 聚合表，读取不阻塞 */
-  const summaries = ref<Partial<Record<KimiUsageRange, KimiUsageSummary>>>({})
+  const summaries = ref<Partial<Record<UsageRange, UsageSummary>>>({})
   const trendRange = ref<TrendRange>('Day')
-  const series = ref<KimiUsageSeries | null>(null)
-  const byProject = ref<KimiUsageGroup[]>([])
-  const byModel = ref<KimiUsageGroup[]>([])
+  const series = ref<UsageSeries | null>(null)
+  const byProject = ref<UsageGroup[]>([])
+  const byModel = ref<UsageGroup[]>([])
 
   const balance = ref<KimiBalance | null>(null)
   /** 余额刷新失败原因（结构化）；unauthorized 时 UI 引导去设置页 */
@@ -34,7 +34,7 @@ export const useKimiStore = defineStore('kimi', () => {
   const scanning = ref(false)
   const scanError = ref<string | null>(null)
   const lastScanAt = ref<string | null>(null)
-  const lastScanReport = ref<KimiScanReport | null>(null)
+  const lastScanReport = ref<ScanReport | null>(null)
   const initialized = ref(false)
   /** 初始化/聚合加载失败原因；非空时页面显示错误横幅，可重试 */
   const loadError = ref<CommandError | null>(null)

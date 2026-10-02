@@ -26,6 +26,10 @@ pub use store::KimiStore;
 /// keyring 中 Kimi 开放平台 key 的引用名（kimi_account.credential_ref 的默认值）
 pub const KIMI_CREDENTIAL_REF: &str = "kimi-openplatform-api-key";
 
+/// usage_event / usage_daily / log_file 表中本模块写入的 cli 列取值
+/// （platform 列固定为 Platform::Kimi；mimocode/omp parser 落库时使用各自的 cli 标识）
+pub const KIMI_CLI: &str = "kimi-code";
+
 #[derive(Debug, Error)]
 pub enum KimiError {
     #[error("日志目录不可读: {0}")]

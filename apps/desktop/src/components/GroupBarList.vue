@@ -2,9 +2,9 @@
 import { computed } from 'vue'
 
 import { formatTokens, formatPercent, inputTotal } from '@/lib/format'
-import type { KimiUsageGroup } from '@toogl/core-types'
+import type { UsageGroup } from '@toogl/core-types'
 
-const props = defineProps<{ items: KimiUsageGroup[]; emptyText: string }>()
+const props = defineProps<{ items: UsageGroup[]; emptyText: string }>()
 
 /** 条宽按输入总量占比计算（相对最大值） */
 const rows = computed(() => {

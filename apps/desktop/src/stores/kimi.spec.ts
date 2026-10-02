@@ -1,7 +1,7 @@
 import { createPinia, setActivePinia } from 'pinia'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { KimiUsageRange, KimiUsageSummary } from '@toogl/core-types'
+import type { UsageRange, UsageSummary } from '@toogl/core-types'
 
 // 与后端交互的 api 层整体 mock，只验证 store 的聚合/切换逻辑
 const mocks = vi.hoisted(() => ({
@@ -19,7 +19,7 @@ vi.mock('@/api/kimi', () => mocks)
 
 import { useKimiStore } from './kimi'
 
-function summaryOf(range: KimiUsageRange, input: number): KimiUsageSummary {
+function summaryOf(range: UsageRange, input: number): UsageSummary {
   return {
     range,
     totals: {
@@ -36,12 +36,12 @@ function summaryOf(range: KimiUsageRange, input: number): KimiUsageSummary {
 beforeEach(() => {
   setActivePinia(createPinia())
   vi.clearAllMocks()
-  mocks.kimiUsageSummary.mockImplementation((range: KimiUsageRange) =>
+  mocks.kimiUsageSummary.mockImplementation((range: UsageRange) =>
     Promise.resolve(summaryOf(range, 100)),
   )
   mocks.kimiUsageByProject.mockResolvedValue([])
   mocks.kimiUsageByModel.mockResolvedValue([])
-  mocks.kimiUsageSeries.mockImplementation((range: KimiUsageRange) =>
+  mocks.kimiUsageSeries.mockImplementation((range: UsageRange) =>
     Promise.resolve({ range, points: [] }),
   )
   mocks.kimiBalanceLatest.mockResolvedValue(null)
@@ -150,7 +150,7 @@ describe('趋势范围切换', () => {
 
     // Week 响应慢（手动控制），Month 立即返回
     let resolveWeek!: (v: { range: string; points: never[] }) => void
-    mocks.kimiUsageSeries.mockImplementation((range: KimiUsageRange) => {
+    mocks.kimiUsageSeries.mockImplementation((range: UsageRange) => {
       if (range === 'Week') {
         return new Promise((resolve) => {
           resolveWeek = resolve

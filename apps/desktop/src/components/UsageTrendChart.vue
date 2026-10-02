@@ -4,9 +4,9 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import { echarts } from '@/lib/echarts'
 import { useSettingsStore } from '@/stores/settings'
-import type { KimiUsageSeries } from '@toogl/core-types'
+import type { UsageSeries } from '@toogl/core-types'
 
-const props = defineProps<{ series: KimiUsageSeries | null }>()
+const props = defineProps<{ series: UsageSeries | null }>()
 
 const settings = useSettingsStore()
 const el = ref<HTMLDivElement | null>(null)

@@ -3,7 +3,7 @@
 //! 数据写入系统临时目录下的独立 SQLite，结束时删除，不碰应用数据库。
 
 use toogl_core::kimicode::{default_sessions_dir, KimiStore};
-use toogl_core::models::KimiUsageRange;
+use toogl_core::models::UsageRange;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -21,10 +21,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("扫描报告: {report:?}");
 
     for range in [
-        KimiUsageRange::Day,
-        KimiUsageRange::Week,
-        KimiUsageRange::Month,
-        KimiUsageRange::Last5Hours,
+        UsageRange::Day,
+        UsageRange::Week,
+        UsageRange::Month,
+        UsageRange::Last5Hours,
     ] {
         let summary = store.summary(range).await?;
         println!("{range:?}: {:?}", summary.totals);
@@ -32,7 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("--- 按项目（本月，前 10） ---");
     for g in store
-        .usage_by_project(KimiUsageRange::Month)
+        .usage_by_project(UsageRange::Month)
         .await?
         .iter()
         .take(10)
@@ -41,7 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("--- 按模型（本月） ---");
-    for g in store.usage_by_model(KimiUsageRange::Month).await? {
+    for g in store.usage_by_model(UsageRange::Month).await? {
         println!("  {}: {:?}", g.key, g.totals);
     }
 

@@ -27,6 +27,11 @@ pub const MIGRATIONS: &[Migration] = &[
         description: "create_kimi_tables",
         sql: include_str!("../migrations/0002_kimi.sql"),
     },
+    Migration {
+        version: 3,
+        description: "multiplatform_generalization",
+        sql: include_str!("../migrations/0003_multiplatform.sql"),
+    },
 ];
 
 /// 按版本号执行未应用过的迁移，并登记到 _toogl_migrations 表。
@@ -103,5 +108,167 @@ mod tests {
                 .unwrap();
         assert_eq!(platform_ok, 1);
         assert_eq!(kimi_ok, 1);
+
+        // 0003 的新表都已建好
+        for table in [
+            "log_file",
+            "usage_event",
+            "usage_daily",
+            "quota_snapshot",
+            "platform_account",
+        ] {
+            let (ok,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM sqlite_master WHERE name = ?")
+                .bind(table)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(ok, 1, "缺少表 {table}");
+        }
+    }
+
+    /// 手动执行某个迁移文件的全部语句（与 migrate 相同的分号切分逻辑）
+    async fn apply_sql(pool: &SqlitePool, sql: &str) {
+        for stmt in sql.split(';') {
+            let stmt = stmt.trim();
+            if !stmt.is_empty() {
+                sqlx::query(stmt).execute(pool).await.unwrap();
+            }
+        }
+    }
+
+    /// 0003 回填：旧 kimi_* 表造数 → 迁移 → 新表数据正确（含新旧 id 映射），重复迁移幂等
+    #[tokio::test]
+    async fn migration_0003_backfills_kimi_data_idempotently() {
+        let (_tmp, pool) = temp_pool().await;
+        // 模拟既有数据库：只应用 0001/0002 并登记（不跑 migrate，避免提前应用 0003）
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS _toogl_migrations (
+                version INTEGER PRIMARY KEY,
+                description TEXT NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for m in &MIGRATIONS[..2] {
+            apply_sql(&pool, m.sql).await;
+            sqlx::query("INSERT INTO _toogl_migrations (version, description) VALUES (?, ?)")
+                .bind(m.version)
+                .bind(m.description)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        // 旧表造数：两个文件、三条事件（事件 3 挂在文件 2 上）、两条日聚合
+        sqlx::query(
+            "INSERT INTO kimi_log_file (id, path, offset, size, mtime, last_scanned_at)
+             VALUES (10, 'C:/logs/a/wire.jsonl', 100, 100, 111, '2026-01-01T00:00:00Z'),
+                    (20, 'C:/logs/b/wire.jsonl', 200, 200, 222, '2026-01-02T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO kimi_usage_event
+                 (log_file_id, ts, session_id, project, model, input_other, output, cache_read, cache_creation)
+             VALUES (10, 1000, 's1', 'app', 'm1', 10, 1, 90, 0),
+                    (10, 2000, 's1', 'app', 'm2', 20, 2, 0, 5),
+                    (20, 3000, 's2', 'blog', 'm1', 30, 3, 60, 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO kimi_usage_daily
+                 (date, project, model, input_other, output, cache_read, cache_creation)
+             VALUES ('2026-01-01', 'app', 'm1', 10, 1, 90, 0),
+                    ('2026-01-01', 'app', 'm2', 20, 2, 0, 5)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        migrate(&pool).await.unwrap();
+
+        // 游标回填：platform='kimi'，字段原样保留；新 id 与旧 id 无关（经 path 映射）
+        let files: Vec<(i64, String, String, i64, i64, i64)> = sqlx::query_as(
+            "SELECT id, platform, path, offset, size, mtime FROM log_file ORDER BY path",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].1, "kimi");
+        assert_eq!(files[0].2, "C:/logs/a/wire.jsonl");
+        assert_eq!((files[0].3, files[0].4, files[0].5), (100, 100, 111));
+        let new_id_a = files[0].0;
+        let new_id_b = files[1].0;
+
+        // 事件回填：log_file_id 映射到新 id，cli/cost 正确
+        let events: Vec<(String, String, i64, i64, String, Option<f64>)> = sqlx::query_as(
+            "SELECT platform, cli, log_file_id, ts, project, cost FROM usage_event ORDER BY ts",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].0, "kimi");
+        assert_eq!(events[0].1, "kimi-code");
+        assert_eq!(events[0].2, new_id_a);
+        assert_eq!(events[2].2, new_id_b);
+        assert!(events.iter().all(|e| e.5.is_none()));
+
+        // 日聚合回填：platform/cli 列补齐，数值不变
+        let daily: Vec<(String, String, String, String, i64)> = sqlx::query_as(
+            "SELECT date, platform, cli, model, input_other FROM usage_daily ORDER BY model",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(daily.len(), 2);
+        assert_eq!(daily[0].1, "kimi");
+        assert_eq!(daily[0].2, "kimi-code");
+        assert_eq!(daily[0].4, 10);
+        assert_eq!(daily[1].4, 20);
+
+        // 幂等：再走一遍 migrate（登记跳过）+ 语句级重复执行 0003，数据不重不丢
+        migrate(&pool).await.unwrap();
+        apply_sql(&pool, MIGRATIONS[2].sql).await;
+        let (file_count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM log_file")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let (event_count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM usage_event")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let (daily_count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM usage_daily")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!((file_count, event_count, daily_count), (2, 3, 2));
+        // 重复回填后事件仍挂在原 log_file id 上（log_file 未被 DELETE 重建）
+        let (mapped,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM usage_event WHERE log_file_id IN (?, ?)")
+                .bind(new_id_a)
+                .bind(new_id_b)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(mapped, 3);
+    }
+
+    /// 空库直接全量迁移：回填语句在 kimi_* 空表上是安全的 no-op
+    #[tokio::test]
+    async fn migration_0003_backfill_noop_on_empty_old_tables() {
+        let (_tmp, pool) = temp_pool().await;
+        migrate(&pool).await.unwrap();
+        let (event_count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM usage_event")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(event_count, 0);
     }
 }

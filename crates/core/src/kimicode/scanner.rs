@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use super::parser::{self, ParsedUsage};
-use crate::models::KimiUsageEvent;
+use super::KIMI_CLI;
+use crate::models::{Platform, UsageEvent};
 
 /// 单个文件的扫描结果
 #[derive(Debug)]
@@ -22,10 +23,10 @@ pub struct ScannedFile {
     pub new_offset: u64,
     /// 触发从头重扫（截断/重建/mtime 变化）；store 层据此整批删除该文件旧事件
     pub truncated: bool,
-    pub events: Vec<KimiUsageEvent>,
+    pub events: Vec<UsageEvent>,
 }
 
-/// 文件扫描游标（store 层持久化于 kimi_log_file 表）
+/// 文件扫描游标（store 层持久化于 log_file 表，按 platform 隔离）
 #[derive(Debug, Clone, Copy)]
 pub struct FileCursor {
     pub offset: u64,
@@ -120,7 +121,7 @@ fn read_incremental(
     project: &str,
     session_id: &str,
     stats: &mut ScanStats,
-) -> std::io::Result<(u64, Vec<KimiUsageEvent>)> {
+) -> std::io::Result<(u64, Vec<UsageEvent>)> {
     let mut file = File::open(path)?;
     file.seek(SeekFrom::Start(offset))?;
     let mut reader = BufReader::new(file);
@@ -148,7 +149,9 @@ fn read_incremental(
                 cache_read,
                 cache_creation,
             })) => {
-                events.push(KimiUsageEvent {
+                events.push(UsageEvent {
+                    platform: Platform::Kimi,
+                    cli: KIMI_CLI.to_string(),
                     ts,
                     session_id: session_id.to_string(),
                     project: project.to_string(),
@@ -157,6 +160,8 @@ fn read_incremental(
                     output,
                     cache_read,
                     cache_creation,
+                    // wire.jsonl 无成本字段，估值由单价表计算
+                    cost: None,
                 });
                 stats.events_parsed += 1;
             }

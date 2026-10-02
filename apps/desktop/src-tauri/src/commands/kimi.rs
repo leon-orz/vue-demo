@@ -9,8 +9,8 @@ use toogl_core::adapters::kimi::DEFAULT_API_BASE;
 use toogl_core::keystore::{KeyringStore, SecretStore, KEYRING_SERVICE_NAME};
 use toogl_core::kimicode::{self, KimiStore, KIMI_CREDENTIAL_REF};
 use toogl_core::models::{
-    CommandError, KimiAccountInfo, KimiAccountInput, KimiBalance, KimiScanReport, KimiUsageGroup,
-    KimiUsageRange, KimiUsageSeries, KimiUsageSummary,
+    CommandError, KimiAccountInfo, KimiAccountInput, KimiBalance, ScanReport, UsageGroup,
+    UsageRange, UsageSeries, UsageSummary,
 };
 
 /// Kimi 模块内部状态：SQLite 连接池 + 会话日志目录（默认自动发现）
@@ -64,7 +64,7 @@ fn keyring() -> KeyringStore {
 pub async fn scan_kimi_logs(
     state: State<'_, KimiState>,
     sessions_dir: Option<String>,
-) -> Result<KimiScanReport, CommandError> {
+) -> Result<ScanReport, CommandError> {
     let inner = state.require()?;
     let dir = sessions_dir
         .map(PathBuf::from)
@@ -76,24 +76,24 @@ pub async fn scan_kimi_logs(
 #[tauri::command]
 pub async fn kimi_usage_summary(
     state: State<'_, KimiState>,
-    range: KimiUsageRange,
-) -> Result<KimiUsageSummary, CommandError> {
+    range: UsageRange,
+) -> Result<UsageSummary, CommandError> {
     Ok(state.require()?.store.summary(range).await?)
 }
 
 #[tauri::command]
 pub async fn kimi_usage_by_project(
     state: State<'_, KimiState>,
-    range: KimiUsageRange,
-) -> Result<Vec<KimiUsageGroup>, CommandError> {
+    range: UsageRange,
+) -> Result<Vec<UsageGroup>, CommandError> {
     Ok(state.require()?.store.usage_by_project(range).await?)
 }
 
 #[tauri::command]
 pub async fn kimi_usage_by_model(
     state: State<'_, KimiState>,
-    range: KimiUsageRange,
-) -> Result<Vec<KimiUsageGroup>, CommandError> {
+    range: UsageRange,
+) -> Result<Vec<UsageGroup>, CommandError> {
     Ok(state.require()?.store.usage_by_model(range).await?)
 }
 
@@ -101,8 +101,8 @@ pub async fn kimi_usage_by_model(
 #[tauri::command]
 pub async fn kimi_usage_series(
     state: State<'_, KimiState>,
-    range: KimiUsageRange,
-) -> Result<KimiUsageSeries, CommandError> {
+    range: UsageRange,
+) -> Result<UsageSeries, CommandError> {
     Ok(state.require()?.store.usage_series(range).await?)
 }
 

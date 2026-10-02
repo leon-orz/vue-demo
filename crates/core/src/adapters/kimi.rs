@@ -8,7 +8,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use super::{AdapterError, UsageAdapter};
-use crate::models::{Credential, Currency, KimiBalance, UsageSnapshot};
+use crate::models::{Credential, KimiBalance, Platform, QuotaSnapshot};
 
 pub const DEFAULT_API_BASE: &str = "https://api.moonshot.cn";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -114,19 +114,27 @@ impl UsageAdapter for KimiAdapter {
         &self,
         base_url: &str,
         cred: &Credential,
-    ) -> Result<UsageSnapshot, AdapterError> {
+    ) -> Result<QuotaSnapshot, AdapterError> {
         let Credential::ApiKey(key) = cred else {
             return Err(AdapterError::Parse(
                 "Kimi 开放平台仅支持 ApiKey 凭据".to_string(),
             ));
         };
         let balance = self.fetch_balance(base_url, key).await?;
-        // 统一快照只承载总额：available 即账户可用余额；分项由 fetch_balance 提供
-        Ok(UsageSnapshot {
-            platform_id: 0,
-            balance: balance.available,
-            used: 0.0,
-            currency: Currency::Cny,
+        // 按量余额无总额概念：只填 remaining=available，voucher/cash 分项与币种进 detail_json
+        Ok(QuotaSnapshot {
+            platform: Platform::Kimi,
+            total: None,
+            used: None,
+            remaining: Some(balance.available),
+            detail_json: Some(
+                serde_json::json!({
+                    "voucher": balance.voucher,
+                    "cash": balance.cash,
+                    "currency": "cny",
+                })
+                .to_string(),
+            ),
             fetched_at: balance.fetched_at,
         })
     }
@@ -185,8 +193,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(adapter.platform_type(), "kimi");
-        assert_eq!(snap.balance, 10.5);
-        assert_eq!(snap.currency, Currency::Cny);
+        assert_eq!(snap.platform, Platform::Kimi);
+        assert_eq!(snap.remaining, Some(10.5));
+        let detail: serde_json::Value =
+            serde_json::from_str(snap.detail_json.as_deref().unwrap()).unwrap();
+        assert_eq!(detail["voucher"], 2.0);
+        assert_eq!(detail["currency"], "cny");
     }
 
     #[tokio::test]
