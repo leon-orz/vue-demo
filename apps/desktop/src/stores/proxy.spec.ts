@@ -21,6 +21,7 @@ function statusOf(overrides: Partial<ProxyStatus> = {}): ProxyStatus {
   return {
     sidecar_alive: true,
     controller_port: 9090,
+    mixed_port: 7890,
     startup_error: null,
     proxies: {
       groups: [

@@ -9,6 +9,14 @@ export type ThemeMode = 'light' | 'dark' | 'system'
 const THEME_KEY = 'toogl.settings.theme'
 const KIMI_SESSIONS_DIR_KEY = 'toogl.settings.kimiSessionsDir'
 
+const THEME_MODES: readonly ThemeMode[] = ['light', 'dark', 'system']
+
+/** 读取持久化主题；脏数据（非法值/缺失）兜底回 system */
+function readPersistedTheme(): ThemeMode {
+  const raw = localStorage.getItem(THEME_KEY)
+  return THEME_MODES.includes(raw as ThemeMode) ? (raw as ThemeMode) : 'system'
+}
+
 /**
  * 系统主题监听器的注销函数（模块级，HMR/重复 init 时先注销旧监听，避免叠加）。
  * 监听器挂在 window 上，store 重建不会自动清理，必须手动管理。
@@ -20,7 +28,7 @@ export const useSettingsStore = defineStore('settings', () => {
   // S2-2 落地离线降级切换逻辑，当前仅占位
   const datasourceMode = ref<DatasourceMode>('direct')
 
-  const theme = ref<ThemeMode>((localStorage.getItem(THEME_KEY) as ThemeMode | null) ?? 'system')
+  const theme = ref<ThemeMode>(readPersistedTheme())
   /** Kimi Code 会话日志目录覆盖；留空 = 自动发现（~/.kimi-code/sessions） */
   const kimiSessionsDir = ref(localStorage.getItem(KIMI_SESSIONS_DIR_KEY) ?? '')
 

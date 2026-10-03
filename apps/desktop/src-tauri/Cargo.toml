@@ -19,8 +19,9 @@ tauri-plugin-shell = "2.4.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toogl-core = { path = "../../../crates/core" }
-# sidecar 就绪轮询的 sleep（tauri::async_runtime 无 sleep 再导出）
-tokio = { version = "1", features = ["time"] }
+# sidecar 就绪轮询的 sleep（tauri::async_runtime 无 sleep 再导出）；
+# sync：ProxyCommandState 惰性启动自检的 OnceCell 语义
+tokio = { version = "1", features = ["time", "sync"] }
 
 [dev-dependencies]
 # sidecar.rs 单测：临时目录（配置生成）+ tokio 测试运行时（降级态探测）

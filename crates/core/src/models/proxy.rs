@@ -143,6 +143,9 @@ pub struct ProxyStatus {
     pub sidecar_alive: bool,
     /// external-controller 实际端口（9090 顺延后的真实值；sidecar 拉起失败为 None）
     pub controller_port: Option<u16>,
+    /// 系统代理开关指向的本地 mixed 端口（mihomo HTTP+SOCKS5 混合入口；
+    /// 首跑在 7890~7900 顺延探测，取值优先级：proxy_setting 持久化值 → config.yaml → 7890）
+    pub mixed_port: u16,
     /// sidecar 拉起失败原因（正常为 None），供前端展示降级提示
     pub startup_error: Option<String>,
     /// mihomo /proxies 摘要（sidecar 不可用或不可达时为 None）

@@ -6,6 +6,7 @@ import type {
   PlatformScanReport,
   QuotaSnapshot,
   UsageRange,
+  UsageSeries,
   UsageSummary,
 } from '@toogl/core-types'
 
@@ -27,6 +28,7 @@ import {
   parseDeepseekQuotaDetail,
   parseKimiQuotaDetail,
   parseMimoQuotaDetail,
+  parseQuotaTotalInput,
   useUsageStore,
 } from './usage'
 
@@ -283,6 +285,82 @@ describe('趋势范围切换', () => {
   })
 })
 
+describe('聚合数据 stale-write 竞态（loadAggregates 与 setTrendRange 共用请求序号）', () => {
+  it('切平台 Tab 后，旧 filter 的在途趋势响应被丢弃，不覆盖新 Tab 数据', async () => {
+    const store = useUsageStore()
+    await store.init()
+    await vi.waitFor(() => expect(store.scanning).toBe(false))
+
+    // 旧 filter（all）的 Week 序列响应慢（手动控制），新 filter 的请求立即返回；
+    // byProject 用 key 标记来源平台，便于区分新旧数据
+    let resolveStale!: (v: UsageSeries) => void
+    mocks.usageSeries.mockImplementation((platform: string, range: UsageRange) => {
+      if (platform === 'all' && range === 'Week') {
+        return new Promise((resolve) => {
+          resolveStale = resolve
+        })
+      }
+      return Promise.resolve({ range, points: [] })
+    })
+    mocks.usageByProject.mockImplementation((platform: string) =>
+      Promise.resolve([
+        {
+          key: `proj-${platform}`,
+          totals: {
+            input_other: 0,
+            output: 0,
+            cache_read: 0,
+            cache_creation: 0,
+            cache_hit_rate: 0,
+            estimated_cost: 0,
+          },
+        },
+      ]),
+    )
+
+    const weekReq = store.setTrendRange('Week')
+    const tabReq = store.setActiveFilter('mimo')
+    await tabReq
+    expect(store.byProject[0]?.key).toBe('proj-mimo')
+
+    // 旧 filter 的慢响应随后落地，应被丢弃
+    resolveStale({ range: 'Week', points: [] })
+    await weekReq
+    expect(store.activeFilter).toBe('mimo')
+    expect(store.byProject[0]?.key).toBe('proj-mimo')
+    expect(store.loadError).toBeNull()
+  })
+
+  it('切趋势范围后，旧 filter 的在途聚合响应被丢弃，不覆盖新范围数据', async () => {
+    const store = useUsageStore()
+    await store.init()
+    await vi.waitFor(() => expect(store.scanning).toBe(false))
+
+    // 切 Tab 触发的 loadAggregates（mimo + 当前 Day 范围）序列响应慢，随后的切范围请求立即返回
+    let resolveStale!: (v: UsageSeries) => void
+    mocks.usageSeries.mockImplementation((platform: string, range: UsageRange) => {
+      if (platform === 'mimo' && range === 'Day') {
+        return new Promise((resolve) => {
+          resolveStale = resolve
+        })
+      }
+      return Promise.resolve({ range, points: [] })
+    })
+
+    const tabReq = store.setActiveFilter('mimo')
+    const monthReq = store.setTrendRange('Month')
+    await monthReq
+    expect(store.series?.range).toBe('Month')
+
+    // 旧 filter 的慢聚合响应随后落地，应被丢弃
+    resolveStale({ range: 'Day', points: [] })
+    await tabReq
+    expect(store.trendRange).toBe('Month')
+    expect(store.series?.range).toBe('Month')
+    expect(store.loadError).toBeNull()
+  })
+})
+
 describe('配额刷新', () => {
   it('刷新成功更新对应平台快照并清空错误', async () => {
     const snapshot: QuotaSnapshot = {
@@ -319,6 +397,25 @@ describe('配额刷新', () => {
     const store = useUsageStore()
     await store.refreshQuota('kimi')
     expect(store.quotaErrors.kimi).toEqual({ kind: 'unauthorized', message: 'token 无效' })
+  })
+})
+
+describe('parseQuotaTotalInput（MiMo 手录总额校验）', () => {
+  it('空串 / 纯空白 = 不配置套餐（null）', () => {
+    expect(parseQuotaTotalInput('')).toBeNull()
+    expect(parseQuotaTotalInput('   ')).toBeNull()
+  })
+
+  it('合法正数解析为数值', () => {
+    expect(parseQuotaTotalInput('1000')).toBe(1000)
+    expect(parseQuotaTotalInput(' 58.5 ')).toBe(58.5)
+  })
+
+  it('NaN / 非正数 / 无穷大均为非法（undefined），防止 NaN 序列化成 null 清空已录总额', () => {
+    expect(parseQuotaTotalInput('abc')).toBeUndefined()
+    expect(parseQuotaTotalInput('0')).toBeUndefined()
+    expect(parseQuotaTotalInput('-100')).toBeUndefined()
+    expect(parseQuotaTotalInput('Infinity')).toBeUndefined()
   })
 })
 

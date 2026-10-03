@@ -5,6 +5,8 @@
 //!   确保不留孤儿进程；
 //! - external-controller 端口冲突顺延：9090 被占则探测 9091…9100，实际端口写入
 //!   proxy_setting 表（toogl_core::proxy_setting，与 UsageService 同一库文件）；
+//! - mixed-port 同样顺延（7890…7900），但只在首跑生成配置模板时生效；实际生效值
+//!   （已有配置以文件解析为准）同样写入 proxy_setting；
 //! - 首次运行生成最小可用配置（app_data_dir/mihomo/config.yaml），已有配置不覆盖；
 //! - 拉起失败（二进制缺失 / 进程秒退 / 就绪超时）降级为错误态：proxy 模块不可用，
 //!   应用其余部分照常（参照 commands/usage.rs UsageState 的降级模式）。
@@ -22,13 +24,16 @@ use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt as _;
 use toogl_core::mihomo::MihomoClient;
 use toogl_core::models::CommandError;
-use toogl_core::proxy_setting::{ProxySettingStore, KEY_CONTROLLER_PORT};
+use toogl_core::proxy_setting::{ProxySettingStore, KEY_CONTROLLER_PORT, KEY_MIXED_PORT};
 
 /// external-controller 探测区间：默认 9090，被占顺延，9100 封顶
 pub const CONTROLLER_PORT_START: u16 = 9090;
 pub const CONTROLLER_PORT_END: u16 = 9100;
-/// 初始配置模板中的本地混合代理端口（HTTP + SOCKS5 入口）
+/// 本地混合代理端口（HTTP + SOCKS5 入口）默认值，兼作全链路口径兜底
 pub const MIXED_PORT: u16 = 7890;
+/// mixed-port 探测区间：默认 7890，被占顺延，7900 封顶（仅首跑生成配置时生效）
+pub const MIXED_PORT_START: u16 = 7890;
+pub const MIXED_PORT_END: u16 = 7900;
 /// 拉起后就绪等待上限（轮询 mihomo /version）
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 /// 就绪轮询间隔
@@ -121,14 +126,34 @@ async fn start_inner(app: &AppHandle, app_data_dir: &Path) -> Result<ProxyCore, 
     // 首跑生成最小可用配置；已有配置（用户手工改过）不覆盖。
     // 注意：顺延后的端口只写进新建的配置模板；既有配置的端口以文件为准，
     // 若与本次探测端口不一致会在就绪等待处超时并报出可读原因。
-    let (config_path, created) =
-        ensure_config(&work_dir, port).map_err(|e| format!("准备 mihomo 配置失败: {e}"))?;
+    // mixed-port 同样做冲突顺延（7890~7900），但只在首跑生成模板时生效：
+    // 已有配置的 mixed-port 以文件为准，若被占 mihomo 会监听失败，
+    // 原因经就绪等待的失败信息（proxy_status.startup_error）体现。
+    let first_run = !work_dir.join("config.yaml").exists();
+    let mixed_port = if first_run {
+        pick_port_in(MIXED_PORT_START, MIXED_PORT_END, port_free).unwrap_or_else(|| {
+            eprintln!(
+                "[sidecar] {MIXED_PORT_START}~{MIXED_PORT_END} 端口全部被占用，回退 {MIXED_PORT}（mihomo 可能监听失败，原因会在启动错误里体现）"
+            );
+            MIXED_PORT
+        })
+    } else {
+        // 占位值：不写入已有配置，实际值下面从文件解析
+        MIXED_PORT
+    };
+    let (config_path, created) = ensure_config(&work_dir, port, mixed_port)
+        .map_err(|e| format!("准备 mihomo 配置失败: {e}"))?;
     if created {
         eprintln!(
             "[sidecar] 已生成初始 mihomo 配置: {}",
             config_path.display()
         );
     }
+    // 实际生效的 mixed 端口：新建即探测值；已有配置以文件内容为准（用户可手改）
+    let effective_mixed_port = std::fs::read_to_string(&config_path)
+        .ok()
+        .and_then(|content| parse_mixed_port(&content))
+        .unwrap_or(mixed_port);
 
     // 拉起 sidecar（二进制缺失 / 未打包时 sidecar() 或 spawn() 报错）
     let command = app
@@ -167,6 +192,12 @@ async fn start_inner(app: &AppHandle, app_data_dir: &Path) -> Result<ProxyCore, 
         Ok(store) => {
             if let Err(e) = store.set(KEY_CONTROLLER_PORT, &port.to_string()).await {
                 eprintln!("[sidecar] 实际端口写库失败（不影响本轮运行）: {e}");
+            }
+            if let Err(e) = store
+                .set(KEY_MIXED_PORT, &effective_mixed_port.to_string())
+                .await
+            {
+                eprintln!("[sidecar] mixed 端口写库失败（不影响本轮运行）: {e}");
             }
         }
         Err(e) => eprintln!("[sidecar] 设置库打开失败（不影响本轮运行）: {e}"),
@@ -247,7 +278,7 @@ fn pick_port_in(start: u16, end: u16, probe: impl Fn(u16) -> bool) -> Option<u16
 /// 首跑最小可用配置模板（纯函数便于单测）。
 /// 分流规则模板与节点导入是后续任务（《02-开发计划》M5 节），这里只保证内核可启动、
 /// RESTful API 可用、全部流量直连兜底。
-fn render_initial_config(controller_port: u16) -> String {
+fn render_initial_config(controller_port: u16, mixed_port: u16) -> String {
     format!(
         r#"# ============================================================
 # Toogl（图格）mihomo 初始配置模板
@@ -255,8 +286,9 @@ fn render_initial_config(controller_port: u16) -> String {
 # 分流规则模板与节点导入是后续功能，当前仅一个 Selector 骨架组兜底直连。
 # ============================================================
 
-# 本地混合代理端口（HTTP + SOCKS5 入口），仅监听本机回环，不暴露到局域网
-mixed-port: {MIXED_PORT}
+# 本地混合代理端口（HTTP + SOCKS5 入口），仅监听本机回环，不暴露到局域网；
+# 端口由 Toogl 首跑时在 7890~7900 探测顺延，被占会顺延到空闲端口
+mixed-port: {mixed_port}
 bind-address: 127.0.0.1
 allow-lan: false
 
@@ -286,19 +318,38 @@ rules:
 
 /// 确保 config.yaml 存在：不存在则写初始模板。
 /// 返回（配置文件路径，是否本次新建）。
-fn ensure_config(work_dir: &Path, controller_port: u16) -> std::io::Result<(PathBuf, bool)> {
+fn ensure_config(
+    work_dir: &Path,
+    controller_port: u16,
+    mixed_port: u16,
+) -> std::io::Result<(PathBuf, bool)> {
     let path = work_dir.join("config.yaml");
     if path.exists() {
         return Ok((path, false));
     }
-    std::fs::write(&path, render_initial_config(controller_port))?;
+    std::fs::write(&path, render_initial_config(controller_port, mixed_port))?;
     Ok((path, true))
 }
 
-/// 解析系统代理开关指向的本地 mixed 端口：读 sidecar 生成的 config.yaml 的
-/// `mixed-port` 字段（用户可手改），读不到/解析失败回退常量 [`MIXED_PORT`]。
+/// 解析系统代理开关指向的本地 mixed 端口，优先级：
+/// 1. proxy_setting 持久化值（sidecar 上次拉起时写入的实际生效值）；
+/// 2. sidecar 生成的 config.yaml 的 `mixed-port` 字段（用户可手改）；
+/// 3. 常量 [`MIXED_PORT`] 兜底。
+///
 /// 注意阶段一约定：系统代理走 mihomo 的 mixed 入口，而不是 external-controller 端口。
-pub fn resolve_mixed_port(app_data_dir: &Path) -> u16 {
+pub async fn resolve_mixed_port(app_data_dir: &Path) -> u16 {
+    let persisted = match ProxySettingStore::connect(app_data_dir.join("toogl.db")).await {
+        Ok(store) => store
+            .get(KEY_MIXED_PORT)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse::<u16>().ok()),
+        Err(_) => None,
+    };
+    if let Some(port) = persisted {
+        return port;
+    }
     let path = app_data_dir.join("mihomo").join("config.yaml");
     std::fs::read_to_string(path)
         .ok()
@@ -362,8 +413,9 @@ mod tests {
 
     #[test]
     fn initial_config_contains_port_and_skeleton() {
-        let yaml = render_initial_config(9093);
-        assert!(yaml.contains("mixed-port: 7890"));
+        let yaml = render_initial_config(9093, 7895);
+        // mixed-port 首跑顺延后的真实值写入模板
+        assert!(yaml.contains("mixed-port: 7895"));
         assert!(yaml.contains("external-controller: 127.0.0.1:9093"));
         assert!(yaml.contains("allow-lan: false"));
         assert!(yaml.contains("proxies: []"));
@@ -372,23 +424,50 @@ mod tests {
         assert!(yaml.contains("- MATCH,节点选择"));
     }
 
+    #[test]
+    fn mixed_port_pick_prefers_default_and_defers_when_occupied() {
+        // 7890 空闲 → 用默认；7890~7892 被占 → 顺延到 7893
+        assert_eq!(
+            pick_port_in(MIXED_PORT_START, MIXED_PORT_END, |_| true),
+            Some(7890)
+        );
+        let occupied: HashSet<u16> = [7890, 7891, 7892].into_iter().collect();
+        assert_eq!(
+            pick_port_in(MIXED_PORT_START, MIXED_PORT_END, |p| !occupied.contains(&p)),
+            Some(7893)
+        );
+        // 全段被占 → None（调用方回退常量并告警）
+        assert_eq!(
+            pick_port_in(MIXED_PORT_START, MIXED_PORT_END, |_| false),
+            None
+        );
+    }
+
     // ---- 配置生成（不覆盖已有） ----
 
     #[test]
     fn ensure_config_creates_template_when_missing() {
         let tmp = tempfile::tempdir().unwrap();
-        let (path, created) = ensure_config(tmp.path(), 9091).unwrap();
+        let (path, created) = ensure_config(tmp.path(), 9091, 7890).unwrap();
         assert!(created);
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("external-controller: 127.0.0.1:9091"));
+        assert!(content.contains("mixed-port: 7890"));
     }
 
     // ---- mixed-port 解析（系统代理开关指向的本地入口） ----
 
     #[test]
     fn parse_mixed_port_from_template_and_edited() {
-        // 初始模板固定 7890
-        assert_eq!(parse_mixed_port(&render_initial_config(9090)), Some(7890));
+        // 初始模板按传入端口生成
+        assert_eq!(
+            parse_mixed_port(&render_initial_config(9090, 7890)),
+            Some(7890)
+        );
+        assert_eq!(
+            parse_mixed_port(&render_initial_config(9090, 7897)),
+            Some(7897)
+        );
         // 用户手改为其他端口
         assert_eq!(
             parse_mixed_port("mixed-port: 7899\nexternal-controller: 127.0.0.1:9090\n"),
@@ -401,16 +480,25 @@ mod tests {
         assert_eq!(parse_mixed_port("mixed-port: abc\n"), None);
     }
 
-    #[test]
-    fn resolve_mixed_port_reads_config_and_falls_back() {
-        // 无配置文件 → 常量兜底
+    #[tokio::test]
+    async fn resolve_mixed_port_priority_persisted_then_file_then_default() {
+        // 无配置无持久化 → 常量兜底
         let tmp = tempfile::tempdir().unwrap();
-        assert_eq!(resolve_mixed_port(tmp.path()), MIXED_PORT);
+        assert_eq!(resolve_mixed_port(tmp.path()).await, MIXED_PORT);
         // 有配置文件且手改过端口 → 以文件为准
         let mihomo_dir = tmp.path().join("mihomo");
         std::fs::create_dir_all(&mihomo_dir).unwrap();
         std::fs::write(mihomo_dir.join("config.yaml"), "mixed-port: 7901\n").unwrap();
-        assert_eq!(resolve_mixed_port(tmp.path()), 7901);
+        assert_eq!(resolve_mixed_port(tmp.path()).await, 7901);
+        // 持久化值优先于文件（sidecar 拉起时写入的实际生效值）
+        let store = ProxySettingStore::connect(tmp.path().join("toogl.db"))
+            .await
+            .unwrap();
+        store.set(KEY_MIXED_PORT, "7895").await.unwrap();
+        assert_eq!(resolve_mixed_port(tmp.path()).await, 7895);
+        // 持久化值损坏 → 回退到文件解析
+        store.set(KEY_MIXED_PORT, "not-a-port").await.unwrap();
+        assert_eq!(resolve_mixed_port(tmp.path()).await, 7901);
     }
 
     #[test]
@@ -422,7 +510,7 @@ mod tests {
             "# 用户手工配置\nexternal-controller: 127.0.0.1:9000\n",
         )
         .unwrap();
-        let (returned, created) = ensure_config(tmp.path(), 9095).unwrap();
+        let (returned, created) = ensure_config(tmp.path(), 9095, 7890).unwrap();
         assert_eq!(returned, path);
         assert!(!created);
         // 内容原样保留（哪怕端口与本次探测不一致）

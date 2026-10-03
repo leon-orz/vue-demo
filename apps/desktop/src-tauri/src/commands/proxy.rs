@@ -1,5 +1,5 @@
 //! M5 魔法工具命令层（S1-3 项3）：薄壳，业务逻辑在 toogl_core（mihomo / sysproxy /
-//! proxy_setting）。前端对应封装见 apps/desktop/src/api/proxy.ts（下一波前端任务）。
+//! proxy_setting）。前端对应封装见 apps/desktop/src/api/proxy.ts。
 //! 所有命令统一返回 Result<T, CommandError>，前端 invoke 抛出的即 CommandError JSON。
 //!
 //! 桌面端仅 Windows（NF-14）：系统代理直接装配 WinRegIo 真实注册表实现，
@@ -34,44 +34,40 @@ pub struct ProxyCommandState {
     settings: Option<ProxySettingStore>,
     /// 系统代理管理器（注册表 IO + SQLite 备份）；初始化失败为 None
     sysproxy: Option<Arc<DesktopSysProxyManager>>,
-    /// 启动自检结果（setup 时执行一次；recover/set_system_proxy(false) 成功后清除）。
+    /// 启动自检结果（首个 proxy_status / set_system_proxy 调用时惰性执行一次并缓存；
+    /// recover/set_system_proxy(false) 成功后清除）。
     /// 自检有副作用（静默清理失效备份），不适合在 proxy_status 里反复跑，故缓存。
     startup_check: Mutex<Option<SystemProxyCheck>>,
-    /// 系统代理开关指向的本地 mixed 端口（读 sidecar 配置，回退常量 7890）
+    /// 保证启动自检全局只跑一次（见 ensure_startup_check）
+    startup_check_once: tokio::sync::OnceCell<()>,
+    /// 系统代理开关指向的本地 mixed 端口（取值优先级见 sidecar::resolve_mixed_port：
+    /// proxy_setting 持久化值 → config.yaml → 常量 7890）
     mixed_port: u16,
     /// 初始化失败原因（降级态）
     init_error: Option<String>,
 }
 
 impl ProxyCommandState {
-    /// 应用 setup 时构造：打开 proxy_setting 库、装配系统代理管理器并跑启动自检。
+    /// 应用 setup 时构造：打开 proxy_setting 库、装配系统代理管理器。
     /// 任何失败收敛为降级态，不 panic（参照 UsageState 的降级模式）。
+    ///
+    /// 纪律：本函数在 setup 里经 `tauri::async_runtime::block_on` 驱动，处于 runtime
+    /// 上下文，**禁止在此直接调用 manager 的同步方法**——SqliteProxyStateStore 内部
+    /// 的专用 runtime block_on 会 panic（Cannot start a runtime from within a runtime）。
+    /// 启动自检因此挪到首个 proxy_status / set_system_proxy 调用时经 spawn_blocking
+    /// 惰性执行（[`Self::ensure_startup_check`]）。
     pub async fn new(app_data_dir: PathBuf) -> Self {
-        let mixed_port = sidecar::resolve_mixed_port(&app_data_dir);
+        let mixed_port = sidecar::resolve_mixed_port(&app_data_dir).await;
         match ProxySettingStore::connect(app_data_dir.join("toogl.db")).await {
             Ok(settings) => {
                 let manager: DesktopSysProxyManager = SystemProxyManager::with_system_registry(
                     SqliteProxyStateStore::new(settings.clone()),
                 );
-                // 启动自检：识别"上次异常退出残留的系统代理开启"，结果缓存并经
-                // proxy_status 暴露给前端；恢复由前端确认后调 recover_system_proxy。
-                // setup 是同步上下文（block_on 进来），manager 同步方法可直接调用。
-                let check = match manager.startup_check() {
-                    Ok(check) => Some(check),
-                    Err(e) => {
-                        eprintln!("[proxy] 系统代理启动自检失败（按无残留处理）: {e}");
-                        None
-                    }
-                };
-                if let Some(check) = &check {
-                    if check.leftover {
-                        eprintln!("[proxy] 检测到上次异常退出的系统代理残留，等待前端确认恢复");
-                    }
-                }
                 Self {
                     settings: Some(settings),
                     sysproxy: Some(Arc::new(manager)),
-                    startup_check: Mutex::new(check),
+                    startup_check: Mutex::new(None),
+                    startup_check_once: tokio::sync::OnceCell::new(),
                     mixed_port,
                     init_error: None,
                 }
@@ -90,6 +86,7 @@ impl ProxyCommandState {
             settings: None,
             sysproxy: None,
             startup_check: Mutex::new(None),
+            startup_check_once: tokio::sync::OnceCell::new(),
             mixed_port,
             init_error: Some(reason),
         }
@@ -106,6 +103,39 @@ impl ProxyCommandState {
                 self.init_error.as_deref().unwrap_or("未知原因")
             ))
         })
+    }
+
+    /// 惰性启动自检：首个 proxy_status / set_system_proxy 调用时执行一次并缓存结果
+    ///（OnceCell 保证只跑一次；自检有清失效备份的副作用，不能反复跑）。
+    /// 识别"上次异常退出残留的系统代理开启"，结果经 proxy_status 暴露给前端；
+    /// 恢复由前端确认后调 recover_system_proxy。
+    /// 必须在异步命令上下文调用：manager 同步方法经 spawn_blocking 进 blocking 线程池，
+    /// 该线程不在 runtime 上下文，SqliteProxyStateStore 内部 block_on 才安全。
+    async fn ensure_startup_check(&self) {
+        let Some(manager) = self.sysproxy.clone() else {
+            return;
+        };
+        self.startup_check_once
+            .get_or_init(|| async move {
+                let check = tauri::async_runtime::spawn_blocking(move || manager.startup_check())
+                    .await
+                    .map_err(|e| eprintln!("[proxy] 系统代理启动自检任务失败: {e}"))
+                    .ok()
+                    .and_then(|r| match r {
+                        Ok(check) => Some(check),
+                        Err(e) => {
+                            eprintln!("[proxy] 系统代理启动自检失败（按无残留处理）: {e}");
+                            None
+                        }
+                    });
+                if check.as_ref().is_some_and(|c| c.leftover) {
+                    eprintln!("[proxy] 检测到上次异常退出的系统代理残留，等待前端确认恢复");
+                }
+                if let Ok(mut g) = self.startup_check.lock() {
+                    *g = check;
+                }
+            })
+            .await;
     }
 
     /// 缓存的启动自检残留标记（proxy_status 暴露用）
@@ -156,6 +186,9 @@ pub async fn proxy_status(
     state: State<'_, ProxyCommandState>,
 ) -> Result<ProxyStatus, CommandError> {
     let alive = core.alive().await;
+
+    // 惰性启动自检（只跑一次，见 ensure_startup_check）
+    state.ensure_startup_check().await;
 
     // mihomo 侧字段：sidecar 不可用/不可达时降级为 None，不算错误
     let (proxies, rule_mode) = match (alive, core.client().ok()) {
@@ -218,6 +251,7 @@ pub async fn proxy_status(
     Ok(ProxyStatus {
         sidecar_alive: alive,
         controller_port: core.port(),
+        mixed_port: state.mixed_port,
         startup_error: core.startup_error().map(str::to_string),
         proxies,
         rule_mode,
@@ -271,15 +305,17 @@ pub async fn test_delay(
         .await)
 }
 
-/// 系统代理开关。开启指向 127.0.0.1:<mixed-port>（mihomo 本地混合入口，读 sidecar
-/// 生成的 config.yaml，回退常量 7890——注意不是 external-controller 端口）。
+/// 系统代理开关。开启指向 127.0.0.1:<mixed-port>（mihomo 本地混合入口，见
+/// sidecar::resolve_mixed_port 的取值优先级——注意不是 external-controller 端口）。
 /// 语义（core::sysproxy）：开启仅在无备份时保存旧现场；关闭有备份精确还原、
 /// 无备份只清 ProxyEnable。注册表为同步 IO，经 spawn_blocking 执行。
+/// 开启前先确保启动自检已跑：其副作用会清理失效备份，避免旧备份挡住本次现场保存。
 #[tauri::command]
 pub async fn set_system_proxy(
     state: State<'_, ProxyCommandState>,
     enabled: bool,
 ) -> Result<(), CommandError> {
+    state.ensure_startup_check().await;
     let manager = state.require_sysproxy()?;
     let server = format!("127.0.0.1:{}", state.mixed_port);
     tauri::async_runtime::spawn_blocking(move || {
@@ -354,6 +390,20 @@ mod tests {
         assert!(state.leftover_check().is_none());
         // 降级态退出钩子为 no-op，不 panic
         state.cleanup_system_proxy_on_exit();
+    }
+
+    /// 回归锁（修复 setup 嵌套 block_on panic）：ProxyCommandState::new 在 runtime
+    /// 上下文（tauri::async_runtime::block_on，即生产 setup 的驱动方式）里构造不再
+    /// panic——启动自检已挪出构造路径，改为首个命令调用时经 spawn_blocking 惰性执行。
+    /// 构造只碰 SQLite（临时目录），不读注册表。
+    #[test]
+    fn new_inside_block_on_context_does_not_panic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state =
+            tauri::async_runtime::block_on(ProxyCommandState::new(tmp.path().to_path_buf()));
+        assert!(state.sysproxy.is_some());
+        // 构造完成时自检尚未执行（惰性），无残留提示
+        assert!(state.leftover_check().is_none());
     }
 
     #[test]

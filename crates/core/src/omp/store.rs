@@ -1,6 +1,6 @@
 //! omp 用量的 SQLite 持久化：扫描结果入库（游标 upsert / 事件追加 / 截断重建 / 日聚合重算）。
 //! 写表方式与 kimicode::store 一致（多平台共用表按 platform 隔离，本平台 platform="omp"、
-//! cli="omp"）；聚合查询由 S1-4 的 DirectSource 跨平台查询层承担，本 store 只负责写入。
+//! cli="omp"）；聚合查询由 usage::query 跨平台查询层承担，本 store 只负责写入。
 //! 表结构由 crates/core/migrations/ 定义，经 crate::db 按版本号迁移执行（schema 统一收归 Rust 侧）。
 
 use std::collections::HashMap;
@@ -73,7 +73,7 @@ impl OmpStore {
             .collect())
     }
 
-    /// 扫描并入库：重扫/续读 → 写事件 → 按需重算日聚合，全程幂等。
+    /// 扫描并入库：重扫 → 写事件 → 按需重算日聚合，全程幂等。
     /// 并发调用经互斥锁排队，保证不会双计入库。
     pub async fn scan_and_record(&self, sessions_root: &Path) -> Result<ScanReport, OmpError> {
         let _guard = self.scan_lock.lock().await;

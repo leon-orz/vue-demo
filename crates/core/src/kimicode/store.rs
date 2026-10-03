@@ -73,7 +73,7 @@ impl KimiStore {
             .collect())
     }
 
-    /// 扫描并入库：重扫/续读 → 写事件 → 按需重算日聚合，全程幂等。
+    /// 扫描并入库：重扫 → 写事件 → 按需重算日聚合，全程幂等。
     /// 并发调用经互斥锁排队，保证不会双计入库。
     pub async fn scan_and_record(&self, sessions_root: &Path) -> Result<ScanReport, KimiError> {
         let _guard = self.scan_lock.lock().await;

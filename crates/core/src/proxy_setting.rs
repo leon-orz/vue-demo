@@ -1,8 +1,8 @@
 //! M5 代理模块设置的简单 KV 持久化（proxy_setting 表，migration 0005）。
 //!
-//! 当前记录 mihomo sidecar external-controller 实际端口（9090 冲突顺延后的真实值）、
-//! 记住的节点选择与规则模式；系统代理状态备份（sysproxy::ProxyBackupState JSON 的
-//! SQLite 版 ProxyStateStore）也基于本表实现（见 [`SqliteProxyStateStore`]）。
+//! 当前记录 mihomo sidecar external-controller 与 mixed-port 实际端口（冲突顺延后的
+//! 真实值）、记住的节点选择与规则模式；系统代理状态备份（sysproxy::ProxyBackupState
+//! JSON 的 SQLite 版 ProxyStateStore）也基于本表实现（见 [`SqliteProxyStateStore`]）。
 //! 桌面端与 hub 各自连自己的库文件，本模块只做纯 KV 读写。
 
 use std::path::Path;
@@ -13,6 +13,10 @@ use crate::sysproxy::{ProxyBackupState, ProxyStateStore, SysProxyError};
 
 /// sidecar external-controller 实际端口（值：十进制端口号字符串）
 pub const KEY_CONTROLLER_PORT: &str = "mihomo.controller_port";
+/// sidecar 本地混合代理（mixed-port）实际端口（值：十进制端口号字符串）。
+/// 首跑生成配置时在 7890~7900 顺延探测；已有配置以 config.yaml 解析值为准，
+/// sidecar 每次拉起都会刷新本 key
+pub const KEY_MIXED_PORT: &str = "mihomo.mixed_port";
 /// 系统代理状态备份（值：sysproxy::ProxyBackupState 的 JSON）
 pub const KEY_PROXY_BACKUP: &str = "sysproxy.backup_state";
 /// 记住的节点选择（值：models::ProxySelection 的 JSON；mihomo 侧才是事实源，仅兜底展示）
@@ -82,9 +86,12 @@ impl ProxySettingStore {
 /// 存进 proxy_setting 表（KEY_PROXY_BACKUP），与系统代理备份 seam 对接。
 ///
 /// 同步 trait 与异步 sqlx 的桥接：内置一个专用 current_thread 运行时跑 block_on。
-/// 调用纪律：所有方法必须在**同步上下文**调用（`Runtime::block_on` 在异步上下文里会
-/// panic）——Tauri 命令层一律经 `async_runtime::spawn_blocking` 调用，setup 与
-/// RunEvent::Exit 本就是同步上下文可直接调用。
+/// 调用纪律：所有方法必须在**同步上下文**调用——`Runtime::block_on` 在已进入
+/// runtime 的线程上会 panic（Cannot start a runtime from within a runtime）。
+/// Tauri 命令层一律经 `async_runtime::spawn_blocking` 调用；RunEvent::Exit 是纯
+/// 同步上下文可直接调用。**注意 setup 经 `tauri::async_runtime::block_on` 驱动异步
+/// 初始化时处于 runtime 上下文，禁止在其中直接调用本类型（及含本类型的
+/// SystemProxyManager）的同步方法**。
 #[derive(Clone)]
 pub struct SqliteProxyStateStore {
     settings: ProxySettingStore,

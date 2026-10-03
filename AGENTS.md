@@ -25,12 +25,14 @@ apps/
     src/                  # Vue 前端：api/（invoke 封装，与 Rust 命令一一对应）、
                           #   stores/（Pinia）、views/、components/、lib/
     src-tauri/            # Rust 壳：src/commands/（Tauri commands 薄壳）、
-                          #   sidecar.rs（mihomo 进程管理，待落地）、binaries/（sidecar 二进制）
+                          #   sidecar.rs（mihomo 进程管理，已落地）、binaries/（sidecar 二进制）
   hub/                    # 中枢服务 toogl-hub（axum + tokio，跑在一体机 Linux 上，无界面，阶段二）
 crates/
   core/                   # 共享核心 toogl-core：models / adapters（kimi/deepseek/mimo 配额适配器）/
                           #   datasource / keystore / mihomo / kimicode / mimocode / omp（三个日志 parser）/
-                          #   usage（聚合查询、配额刷新、账户配置的编排层）
+                          #   usage/（编排层：query 聚合查询、quota 配额刷新、account 账户配置）/
+                          #   sysproxy.rs（系统代理读写与现场备份还原）、proxy_setting.rs（代理设置持久化）、
+                          #   db.rs（SQLite 连接与迁移执行）
                           #   migrations/（SQLite schema，由 src/db.rs 按版本号迁移执行）
 packages/
   core-types/             # @toogl/core-types：TS 类型，ts-rs 从 Rust models 生成
@@ -81,7 +83,7 @@ cargo test -p toogl-core -- --ignored keyring_real_roundtrip   # 真实系统钥
 - **Rust（主力）**：`cargo test --workspace`。日志解析器（M1 心脏）用脱敏 wire.jsonl fixture 驱动单元测试，覆盖增量偏移与聚合边界；HTTP 适配器用 wiremock mock server 测错误路径（401/超时/字段缺失）。`#[ignore]` 标注依赖真实系统能力的测试（如 keyring 冒烟），手动执行。
 - **前端**：Vitest 测关键 store（usage/proxy/settings），组件测试从简，不写脆弱快照测试。
 - **e2e**：tauri-driver + WebdriverIO，只覆盖 3 条核心链路（启动见数据 / 切换节点 / 系统代理开关）。
-- **CI**（`.github/workflows/ci.yml`，windows-latest）：`pnpm lint` + `format:check`；`cargo fmt --check` + `clippy -D warnings` + `cargo test` + bindings 一致性校验；最后 `tauri build`。
+- **CI**（`.github/workflows/ci.yml`，windows-latest）：`pnpm lint` + `format:check` + `pnpm test:front`（Vitest）；`cargo fmt --check` + `clippy -D warnings` + `cargo test` + bindings 一致性校验；最后 `tauri build`。
 - 每里程碑按《02-开发计划》第 4 节验收标准过真实环境。
 
 ## 安全注意事项
@@ -96,7 +98,7 @@ cargo test -p toogl-core -- --ignored keyring_real_roundtrip   # 真实系统钥
 
 阶段一 S1-3 / S1-4 已完成（脚手架 S1-1 + M1 多平台用量统计 + M5 魔法工具核心三件套）：
 
-- 已就绪：monorepo 脚手架与 CI、keystore 命令（keyring 显式 windows-native，SERVICE_NAME 统一在 `keystore::KEYRING_SERVICE_NAME`）、Rust 侧统一 schema 迁移（`crates/core/migrations/`，事件/日聚合/游标表带 `platform`+`cli` 维度，另有 quota_snapshot / platform_account / proxy_setting，由 `db::migrate` 幂等执行；tauri-plugin-sql 已移除）、三个日志 parser（`crates/core/kimicode` wire.jsonl、`mimocode` mimocode.db 只读、`omp` JSONL，统一归一化为 UsageEvent，共享增量游标 + 按日预聚合框架；单文件容错 + size/mtime 变化触发幂等重扫；扫描互斥锁防并发双计）、`crates/core/usage/` 编排层（聚合查询 query / 配额刷新 quota / 账户配置 account）、三个配额适配器（`adapters/kimi.rs` 余额 + 非官方 coding usages best-effort，`deepseek.rs` 官方 /user/balance，`mimo.rs` 手录总额 + 本地日志推算，纯本地不发请求；wiremock 覆盖 401/超时/字段缺失）、泛化 Tauri commands（`commands/usage.rs`，统一返回结构化 `CommandError`，单平台失败不影响其他平台）、前端多平台用量页（`views/Usage.vue` 平台 Tab + QuotaCard 降级态；`stores/usage.ts`）、Dashboard 多平台摘要卡、设置页平台分区、ts-rs bindings 链路（含 index.ts 完整性测试）。
+- 已就绪：monorepo 脚手架与 CI、凭据读写收进 `platform_account_set`（keyring 显式 windows-native，SERVICE_NAME 统一在 `keystore::KEYRING_SERVICE_NAME`）、Rust 侧统一 schema 迁移（`crates/core/migrations/`，事件/日聚合/游标表带 `platform`+`cli` 维度，另有 quota_snapshot / platform_account / proxy_setting，由 `db::migrate` 幂等执行；tauri-plugin-sql 已移除）、三个日志 parser（`crates/core/kimicode` wire.jsonl、`mimocode` mimocode.db 只读、`omp` JSONL，统一归一化为 UsageEvent，共享增量游标 + 按日预聚合框架；单文件容错 + size/mtime 变化触发幂等重扫；扫描互斥锁防并发双计）、`crates/core/usage/` 编排层（聚合查询 query / 配额刷新 quota / 账户配置 account）、三个配额适配器（`adapters/kimi.rs` 余额 + 非官方 coding usages best-effort，`deepseek.rs` 官方 /user/balance，`mimo.rs` 手录总额 + 本地日志推算，纯本地不发请求；wiremock 覆盖 401/超时/字段缺失）、泛化 Tauri commands（`commands/usage.rs`，统一返回结构化 `CommandError`，单平台失败不影响其他平台）、前端多平台用量页（`views/Usage.vue` 平台 Tab + QuotaCard 降级态；`stores/usage.ts`）、Dashboard 多平台摘要卡、设置页平台分区、ts-rs bindings 链路（含 index.ts 完整性测试）。
 - M5 魔法工具（S1-3）：mihomo v1.19.32 sidecar（`src-tauri/binaries/` 固定版本，sha256 与官方 release digest 一致；externalBin + tauri-plugin-shell；setup 拉起 / `RunEvent::Exit` 回收；external-controller 仅回环、端口顺延 9090-9100 持久化到 proxy_setting；首跑生成仅回环初始配置模板）、`crates/core/mihomo/client.rs` RESTful 客户端（代理组/切节点/并发测速/模式切换/存活探测）、`crates/core/sysproxy.rs` 系统代理（RegistryIo/ProxyStateStore seam，开启备份现场/关闭无损还原/崩溃残留自检恢复，测试全 mock 不碰真实注册表）、proxy 命令六条（`commands/proxy.rs`：`proxy_status` 字段级降级、`select_proxy`、`test_delay`、`set_system_proxy`、`switch_rule_mode`、`recover_system_proxy`；退出钩子先恢复系统代理再杀 sidecar）、前端 `views/Proxy.vue` + `stores/proxy.ts`（4s 轮询、乐观更新失败回滚、残留提示恢复流）。
 - 骨架待落地：节点导入（M5-07 分享链接/订阅，S1-3 拆出的后续任务）、HubSource（S2-2）、hub API /usage /config /control（S2-1，现仅 /api/v1/health）。
 - 已知占位：用量估值单价表全 0（estimated_cost 恒 0，待官方价格确认，将迁移为 M6 可配置项）；MiMo 配额无公开 API，只能手录总额 + 本地日志推算消耗。

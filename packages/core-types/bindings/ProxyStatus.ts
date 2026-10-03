@@ -18,6 +18,11 @@ sidecar_alive: boolean,
  */
 controller_port: number | null, 
 /**
+ * 系统代理开关指向的本地 mixed 端口（mihomo HTTP+SOCKS5 混合入口；
+ * 首跑在 7890~7900 顺延探测，取值优先级：proxy_setting 持久化值 → config.yaml → 7890）
+ */
+mixed_port: number, 
+/**
  * sidecar 拉起失败原因（正常为 None），供前端展示降级提示
  */
 startup_error: string | null, 

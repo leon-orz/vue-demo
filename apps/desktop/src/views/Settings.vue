@@ -16,7 +16,7 @@ import {
 import { Separator } from '@/components/ui/separator'
 import { toCommandError } from '@/api/errors'
 import { useSettingsStore, type ThemeMode } from '@/stores/settings'
-import { useUsageStore } from '@/stores/usage'
+import { useUsageStore, parseQuotaTotalInput } from '@/stores/usage'
 import type { Platform } from '@toogl/core-types'
 
 const usage = useUsageStore()
@@ -109,15 +109,20 @@ async function saveKeyAccount(platform: 'kimi' | 'deepseek') {
 }
 
 async function saveMimoAccount() {
+  // 先校验再进入保存流程：非法输入（NaN/非正数）拒绝保存并提示，不清空已录总额
+  const quotaTotal = parseQuotaTotalInput(mimoQuotaTotal.value)
+  if (quotaTotal === undefined) {
+    mimoMessage.value = '月度 Credit 总额需为大于 0 的数字；留空表示不配置套餐'
+    return
+  }
   mimoSaving.value = true
   mimoMessage.value = ''
   try {
-    const total = mimoQuotaTotal.value.trim()
     await usage.saveAccount('mimo', {
       platform: 'mimo',
       name: 'MiMo 套餐',
       api_base: null,
-      quota_total: total === '' ? null : Number(total),
+      quota_total: quotaTotal,
       quota_cycle: mimoQuotaCycle.value,
       enabled: true,
     })

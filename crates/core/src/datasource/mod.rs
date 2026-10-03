@@ -1,5 +1,9 @@
 //! 数据获取层抽象（见《02-开发计划》1.5）：DirectSource 直连各平台，
 //! HubSource 从中枢拉取（阶段二）。UI 层面向 trait 编程，切换数据源零改动。
+//!
+//! **当前状态：阶段二预留设计，阶段一未接线。** 整层（DataSource trait / DirectSource /
+//! HubSource）暂无调用方；S1-4 实际数据流为 commands → usage::quota / usage::query，
+//! 未经过本层。保留此层作为阶段二 HubSource 的设计锚点。
 
 use thiserror::Error;
 
@@ -25,10 +29,11 @@ pub struct DirectSource;
 
 impl DataSource for DirectSource {
     async fn fetch_all_usage(&self) -> Result<Vec<QuotaSnapshot>, DataSourceError> {
-        // TODO(S1-4)：遍历启用的 platform_account，调度对应适配器并发拉取。
-        // 占位期间显式报错而非返回空 vec，避免把"未实现"误读为"无用量"
+        // 未接线：阶段一的配额聚合走 usage::quota::refresh（遍历启用的 platform_account
+        // 并调度适配器），不经过本层。占位期间显式报错而非返回空 vec，
+        // 避免把"未实现"误读为"无用量"
         Err(DataSourceError::NotImplemented(
-            "DirectSource 聚合调度（S1-4，随多平台配额适配器落地）",
+            "DirectSource 聚合调度（阶段二接线 HubSource 时一并处理）",
         ))
     }
 }

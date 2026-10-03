@@ -90,6 +90,19 @@ export interface MimoQuotaDetail {
   unit: string | null
 }
 
+/**
+ * 解析 MiMo 手录套餐总额输入：空串 = 不配置套餐（null）；
+ * 非有限正数返回 undefined 表示非法输入，调用方必须拒绝保存——
+ * NaN 经 JSON 序列化会变 null，静默清掉已录总额，必须在入库前拦下。
+ */
+export function parseQuotaTotalInput(raw: string): number | null | undefined {
+  const trimmed = raw.trim()
+  if (trimmed === '') return null
+  const parsed = Number(trimmed)
+  if (!Number.isFinite(parsed) || parsed <= 0) return undefined
+  return parsed
+}
+
 export function parseMimoQuotaDetail(
   snapshot: QuotaSnapshot | null | undefined,
 ): MimoQuotaDetail | null {
@@ -175,8 +188,11 @@ export const useUsageStore = defineStore('usage', () => {
   const initialized = ref(false)
   /** 初始化/聚合加载失败原因；非空时页面显示错误横幅，可重试 */
   const loadError = ref<CommandError | null>(null)
-  /** 趋势切换请求序号：快速切换时丢弃过期响应，避免慢的旧请求覆盖新数据 */
-  let trendRequestId = 0
+  /**
+   * 聚合数据（series / byProject / byModel）写请求序号：loadAggregates 与 setTrendRange 共用。
+   * 每个发起点 bump、落地前校验，快速切 Tab / 切范围时慢的旧响应直接丢弃，不覆盖新数据。
+   */
+  let aggregatesRequestId = 0
 
   const todaySummary = computed(() => summaries.value.Day ?? null)
   const last5Summary = computed(() => summaries.value.Last5Hours ?? null)
@@ -207,24 +223,27 @@ export const useUsageStore = defineStore('usage', () => {
     }
   }
 
-  /** 拉取当前选中过滤的聚合数据（汇总 + 当前趋势范围的分组与序列），失败写入 loadError */
+  /** 拉取当前选中过滤的聚合数据（汇总 + 当前趋势范围的分组与序列），失败写入 loadError；过期响应丢弃 */
   async function loadAggregates() {
     const filter = activeFilter.value
+    const range = trendRange.value
+    const requestId = ++aggregatesRequestId
     try {
       const [day, last5, month, trend, projects, models] = await Promise.all([
         api.usageSummary(filter, 'Day'),
         api.usageSummary(filter, 'Last5Hours'),
         api.usageSummary(filter, 'Month'),
-        api.usageSeries(filter, trendRange.value),
-        api.usageByProject(filter, trendRange.value),
-        api.usageByModel(filter, trendRange.value),
+        api.usageSeries(filter, range),
+        api.usageByProject(filter, range),
+        api.usageByModel(filter, range),
       ])
+      if (requestId !== aggregatesRequestId) return
       summaries.value = { ...summaries.value, Day: day, Last5Hours: last5, Month: month }
       series.value = trend
       byProject.value = projects
       byModel.value = models
     } catch (err) {
-      loadError.value = toCommandError(err)
+      if (requestId === aggregatesRequestId) loadError.value = toCommandError(err)
     }
   }
 
@@ -243,19 +262,19 @@ export const useUsageStore = defineStore('usage', () => {
   async function setTrendRange(range: TrendRange) {
     trendRange.value = range
     const filter = activeFilter.value
-    const requestId = ++trendRequestId
+    const requestId = ++aggregatesRequestId
     try {
       const [trend, projects, models] = await Promise.all([
         api.usageSeries(filter, range),
         api.usageByProject(filter, range),
         api.usageByModel(filter, range),
       ])
-      if (requestId !== trendRequestId) return
+      if (requestId !== aggregatesRequestId) return
       series.value = trend
       byProject.value = projects
       byModel.value = models
     } catch (err) {
-      if (requestId === trendRequestId) loadError.value = toCommandError(err)
+      if (requestId === aggregatesRequestId) loadError.value = toCommandError(err)
     }
   }
 

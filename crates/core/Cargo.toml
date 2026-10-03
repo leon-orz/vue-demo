@@ -13,7 +13,7 @@ ts-rs = "10"
 # sync: 扫描互斥锁；rt: mihomo 批量测速的 tokio::spawn 并发
 tokio = { version = "1", features = ["sync", "rt"] }
 # 注意：keyring 3 默认不启用任何平台后端（会静默退化为 mock 内存存储），必须显式启用。
-# 桌面端仅 Windows（NF-12）→ windows-native；hub（Linux）按开发计划 1.3 走加密文件存储，不用系统钥匙串
+# 桌面端仅 Windows（NF-14）→ windows-native；hub（Linux）按开发计划 1.3 走加密文件存储，不用系统钥匙串
 keyring = { version = "3", features = ["windows-native"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }

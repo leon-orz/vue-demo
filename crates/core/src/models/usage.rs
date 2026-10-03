@@ -99,7 +99,7 @@ pub struct UsageTotals {
 }
 
 impl UsageTotals {
-    /// 只负责聚合命中率；estimated_cost 由查询层（kimicode::store）按单价表填充，
+    /// 只负责聚合命中率；estimated_cost 由查询层（usage::query）按单价表填充，
     /// 数据层不反向依赖业务层。
     pub fn new(input_other: i64, output: i64, cache_read: i64, cache_creation: i64) -> Self {
         let input_total = input_other + cache_read + cache_creation;
@@ -247,23 +247,23 @@ pub struct PlatformAccountInput {
     pub enabled: bool,
 }
 
-/// 增量扫描结果报告（scan_usage_logs 返回值）
+/// 日志扫描结果报告（scan_usage_logs 返回值）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../packages/core-types/bindings/")]
 pub struct ScanReport {
     /// 发现的日志文件总数
     #[ts(type = "number")]
     pub files_found: u64,
-    /// 因截断/重建/mtime 变化而从头重扫的文件数
+    /// 因 size/mtime 变化而从头重扫的文件数（含普通追加触发的重扫，不限于截断/重建）
     #[ts(type = "number")]
     pub files_rescanned: u64,
     /// 读取/取元数据失败而跳过的文件数（游标不动，下次扫描自然重试）
     #[ts(type = "number")]
     pub files_failed: u64,
-    /// 本次新增入库的用量事件数
+    /// 本次写入的用量事件行数（重扫会整批删除后重放，重放的行数也计入，非纯新增）
     #[ts(type = "number")]
     pub events_added: u64,
-    /// 含不完整尾行的文件数（写入半途的行不消费，下次续读覆盖）
+    /// 含不完整尾行的文件数（写入半途的行不消费，下次重扫时覆盖）
     #[ts(type = "number")]
     pub partial_lines_skipped: u64,
     /// 解析失败跳过的行数（诊断指标，不中断扫描）

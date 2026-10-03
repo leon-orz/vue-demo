@@ -1,4 +1,6 @@
-//! 增量扫描器：遍历 sessions 目录下的会话 jsonl，按游标续读，产出归一化事件。
+//! 日志扫描器：遍历 sessions 目录下的会话 jsonl，产出归一化事件。
+//! 注意：不是真正的"增量续读"——游标（offset + mtime）只用于变化检测，size/mtime
+//! 任一变化即从头全量重扫，幂等性由 store 层整批重建（先删该文件旧事件再写入）保证。
 //! 游标持久化由 store 层负责，本模块只做"文件系统 + 游标输入 → 事件 + 新游标"的纯转换。
 //!
 //! 复用 kimicode::scanner 的游标/结果类型与截断检测模式（size 或 mtime 变化即从头重扫，
@@ -8,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 pub use crate::kimicode::scanner::{FileCursor, ScanOutput, ScanStats, ScannedFile};
@@ -61,18 +63,14 @@ fn project_from_cwd(cwd: &str) -> String {
         .to_string()
 }
 
-/// 从 offset 续读单个文件。只处理以换行符结尾的完整行（写入半途的尾行不消费，下次续读覆盖）。
+/// 从头读取单个文件。只处理以换行符结尾的完整行（写入半途的尾行不消费，下次重扫时覆盖）。
+/// 恒定从头读：本扫描器不做 offset 续读，任何变化都由 scan() 触发全量重扫。
 /// 逐行维护会话元信息（session 行先于消息行出现），事件归属读到时的最新会话上下文。
-fn read_incremental(
-    path: &Path,
-    offset: u64,
-    stats: &mut ScanStats,
-) -> std::io::Result<(u64, Vec<UsageEvent>)> {
-    let mut file = File::open(path)?;
-    file.seek(SeekFrom::Start(offset))?;
+fn read_incremental(path: &Path, stats: &mut ScanStats) -> std::io::Result<(u64, Vec<UsageEvent>)> {
+    let file = File::open(path)?;
     let mut reader = BufReader::new(file);
     let mut events = Vec::new();
-    let mut consumed = offset;
+    let mut consumed = 0u64;
     let mut line = String::new();
     // 会话上下文：session 行出现前用文件名/unknown 兜底
     let mut session_id: Option<String> = None;
@@ -84,7 +82,7 @@ fn read_incremental(
             break; // EOF
         }
         if !line.ends_with('\n') {
-            // 不完整尾行：不前进偏移，留给下次续读
+            // 不完整尾行：不前进偏移，留给下次重扫
             stats.partial_lines_skipped += 1;
             break;
         }
@@ -186,7 +184,7 @@ pub fn scan(root: &Path, cursors: &HashMap<PathBuf, FileCursor>) -> std::io::Res
             });
             continue;
         }
-        match read_incremental(&path, 0, &mut stats) {
+        match read_incremental(&path, &mut stats) {
             Ok((new_offset, events)) => files.push(ScannedFile {
                 path,
                 size,

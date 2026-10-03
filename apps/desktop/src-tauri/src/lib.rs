@@ -9,9 +9,6 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
-            commands::keyring::keystore_set,
-            commands::keyring::keystore_get,
-            commands::keyring::keystore_delete,
             commands::usage::scan_usage_logs,
             commands::usage::usage_summary,
             commands::usage::usage_by_project,
@@ -53,9 +50,12 @@ pub fn run() {
             };
             app.manage(proxy_state);
 
-            // S1-3 项3：proxy 命令层状态（proxy_setting 库 + 系统代理管理器），
-            // 构造时跑系统代理启动自检（上次异常退出残留识别），结果经 proxy_status
-            // 暴露给前端；恢复由前端确认后调 recover_system_proxy
+            // S1-3 项3：proxy 命令层状态（proxy_setting 库 + 系统代理管理器）。
+            // 系统代理启动自检（上次异常退出残留识别）不在此执行——此处经 block_on
+            // 驱动处于 runtime 上下文，直接调 manager 同步方法会嵌套 runtime panic；
+            // 自检改为首个 proxy_status / set_system_proxy 调用时经 spawn_blocking
+            // 惰性执行一次（见 ProxyCommandState::ensure_startup_check），结果经
+            // proxy_status 暴露给前端；恢复由前端确认后调 recover_system_proxy
             let proxy_cmd_state = match app.path().app_data_dir() {
                 Ok(dir) => {
                     tauri::async_runtime::block_on(commands::proxy::ProxyCommandState::new(dir))
