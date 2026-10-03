@@ -37,6 +37,11 @@ pub const MIGRATIONS: &[Migration] = &[
         description: "cleanup_legacy_kimi_and_gateway_tables",
         sql: include_str!("../migrations/0004_cleanup_legacy.sql"),
     },
+    Migration {
+        version: 5,
+        description: "create_proxy_setting",
+        sql: include_str!("../migrations/0005_proxy_setting.sql"),
+    },
 ];
 
 /// 按版本号执行未应用过的迁移，并登记到 _toogl_migrations 表。

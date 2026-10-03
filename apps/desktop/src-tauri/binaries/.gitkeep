@@ -1,3 +1,0 @@
-# mihomo sidecar 二进制目录（S1-3）
-# 放置 mihomo-x86_64-pc-windows-msvc.exe 并在 tauri.conf.json 注册 externalBin。
-# 二进制体积大，不入库（见 .gitignore 补充或 Git LFS，S1-3 决策）。
