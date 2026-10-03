@@ -9,14 +9,8 @@ import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { formatMoney, formatTokens, inputTotal } from '@/lib/format'
 import { RULE_MODE_LABELS, useProxyStore } from '@/stores/proxy'
-import {
-  parseMimoQuotaDetail,
-  PLATFORM_LABELS,
-  USAGE_PLATFORMS,
-  useUsageStore,
-} from '@/stores/usage'
+import { useUsageStore } from '@/stores/usage'
 import { useSettingsStore } from '@/stores/settings'
-import type { Platform } from '@toogl/core-types'
 
 const usage = useUsageStore()
 const settings = useSettingsStore()
@@ -31,39 +25,21 @@ const proxyCurrentNode = computed(() => {
   return remembered ? `${remembered.group} · ${remembered.node}` : ''
 })
 
-/** 各平台配额/余额的一行摘要；未配置/不可达时返回引导文案而非报错 */
-function quotaSummary(platform: Platform): string {
-  const account = usage.accounts[platform]
-  const snapshot = usage.quotas[platform]
-  switch (platform) {
-    case 'omp':
-      return '仅本地日志统计，无配额数据源'
-    case 'mimo': {
-      if (account?.quota_total == null) return '配额未配置，去设置页手录套餐总额'
-      const progress = parseMimoQuotaDetail(snapshot)?.progress
-      if (progress == null) return '套餐进度暂无数据，去用量页刷新'
-      return `套餐已用 ${(progress * 100).toFixed(1)}%${progress > 1 ? '（已超额）' : ''}`
-    }
-    default: {
-      // kimi / deepseek：按量余额；凭据失效（unauthorized）与 QuotaCard 一致，优先引导重新配置
-      if (!account?.has_credential) return '余额未配置，去设置页配置 API Key'
-      if (usage.quotaErrors[platform]?.kind === 'unauthorized')
-        return '凭据失效，请去设置页重新配置'
-      if (snapshot?.remaining == null) return '余额暂无数据，去用量页刷新'
-      return `余额 ${formatMoney(snapshot.remaining)}`
-    }
-  }
-}
+/** Kimi 配额/余额的一行摘要；未配置/不可达时返回引导文案而非报错 */
+const kimiQuotaSummary = computed(() => {
+  const account = usage.accounts.kimi
+  const snapshot = usage.quotas.kimi
+  // 凭据失效（unauthorized）与 QuotaCard 一致，优先引导重新配置
+  if (!account?.has_credential) return '余额未配置，去设置页配置 API Key'
+  if (usage.quotaErrors.kimi?.kind === 'unauthorized') return '凭据失效，请去设置页重新配置'
+  if (snapshot?.remaining == null) return '余额暂无数据，去用量页刷新'
+  return `余额 ${formatMoney(snapshot.remaining)}`
+})
 
 /** 是否需要「去设置页配置」引导（未配置或凭据失效时卡片显示引导入口，不报错） */
-function needsSetup(platform: Platform): boolean {
-  if (platform === 'omp') return false
-  if (platform === 'mimo') return usage.accounts[platform]?.quota_total == null
-  return (
-    !usage.accounts[platform]?.has_credential ||
-    usage.quotaErrors[platform]?.kind === 'unauthorized'
-  )
-}
+const kimiNeedsSetup = computed(
+  () => !usage.accounts.kimi?.has_credential || usage.quotaErrors.kimi?.kind === 'unauthorized',
+)
 
 // Dashboard 只读各模块缓存数据；用量 store 未初始化时补一次（后台扫描同用量页），代理状态拉一次快照
 onMounted(() => {
@@ -86,17 +62,12 @@ onMounted(() => {
       @retry="usage.retry(settings.kimiSessionsDir || undefined)"
     />
 
-    <!-- DB-01：各平台今日用量 + 配额摘要；DB-02：点击跳转用量页 -->
+    <!-- DB-01：Kimi 今日用量 + 配额摘要；DB-02：点击跳转用量页 -->
     <section class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
-      <RouterLink
-        v-for="platform in USAGE_PLATFORMS"
-        :key="platform"
-        to="/usage"
-        class="block transition-transform hover:-translate-y-0.5"
-      >
+      <RouterLink to="/usage" class="block transition-transform hover:-translate-y-0.5">
         <Card class="h-full">
           <CardHeader class="flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle class="text-base">{{ PLATFORM_LABELS[platform] }} 今日用量</CardTitle>
+            <CardTitle class="text-base">Kimi 今日用量</CardTitle>
             <ArrowRight class="size-4 text-muted-foreground" />
           </CardHeader>
           <CardContent class="flex flex-col gap-2">
@@ -105,28 +76,22 @@ onMounted(() => {
                 <p class="text-xs text-muted-foreground">输入</p>
                 <p class="text-xl font-bold">
                   {{
-                    usage.todayByFilter[platform]
-                      ? formatTokens(inputTotal(usage.todayByFilter[platform]!.totals))
-                      : '—'
+                    usage.todaySummary ? formatTokens(inputTotal(usage.todaySummary.totals)) : '—'
                   }}
                 </p>
               </div>
               <div>
                 <p class="text-xs text-muted-foreground">输出</p>
                 <p class="text-xl font-bold">
-                  {{
-                    usage.todayByFilter[platform]
-                      ? formatTokens(usage.todayByFilter[platform]!.totals.output)
-                      : '—'
-                  }}
+                  {{ usage.todaySummary ? formatTokens(usage.todaySummary.totals.output) : '—' }}
                 </p>
               </div>
             </div>
-            <CacheHitBadge :rate="usage.todayByFilter[platform]?.totals.cache_hit_rate ?? null" />
+            <CacheHitBadge :rate="usage.todaySummary?.totals.cache_hit_rate ?? null" />
             <p class="text-xs text-muted-foreground">
-              {{ quotaSummary(platform) }}
+              {{ kimiQuotaSummary }}
               <span
-                v-if="needsSetup(platform)"
+                v-if="kimiNeedsSetup"
                 class="cursor-pointer text-primary underline-offset-4 hover:underline"
                 @click.prevent.stop="router.push('/settings')"
                 >去配置</span

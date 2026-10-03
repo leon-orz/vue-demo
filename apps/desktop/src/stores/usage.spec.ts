@@ -24,13 +24,7 @@ const mocks = vi.hoisted(() => ({
 }))
 vi.mock('@/api/usage', () => mocks)
 
-import {
-  parseDeepseekQuotaDetail,
-  parseKimiQuotaDetail,
-  parseMimoQuotaDetail,
-  parseQuotaTotalInput,
-  useUsageStore,
-} from './usage'
+import { parseKimiQuotaDetail, useUsageStore } from './usage'
 
 function summaryOf(range: UsageRange, input: number): UsageSummary {
   return {
@@ -80,30 +74,23 @@ beforeEach(() => {
   )
   mocks.quotaLatest.mockResolvedValue(null)
   mocks.platformAccountGet.mockResolvedValue(null)
-  mocks.scanUsageLogs.mockResolvedValue([
-    scanReportOf('kimi', 3),
-    scanReportOf('mimo', 0),
-    scanReportOf('omp', 1),
-  ])
+  mocks.scanUsageLogs.mockResolvedValue([scanReportOf('kimi', 3)])
 })
 
 describe('usage store 聚合加载', () => {
-  it('init 先读缓存聚合，再后台全平台扫描并刷新，全程不抛出', async () => {
+  it('init 先读缓存聚合，再后台扫描并刷新，全程不抛出', async () => {
     const store = useUsageStore()
     await store.init('D:/logs')
-    // init 返回时缓存数据已就位
+    // init 返回时缓存数据已就位（默认过滤为 kimi 单平台）
     expect(store.todaySummary?.totals.input_other).toBe(100)
     expect(store.monthSummary?.range).toBe('Month')
-    // 总览卡片墙：all + 四个平台的今日摘要
-    expect(store.todayByFilter.all?.totals.input_other).toBe(100)
-    expect(store.todayByFilter.kimi?.totals.input_other).toBe(100)
-    // 后台扫描：全平台（platform 不传），覆盖目录透传给后端
+    // 后台扫描：platform 不传，覆盖目录透传给后端
     await vi.waitFor(() => expect(store.scanning).toBe(false))
     expect(mocks.scanUsageLogs).toHaveBeenCalledWith(undefined, 'D:/logs')
     expect(store.lastScanAt).not.toBeNull()
-    expect(store.lastScanEventsAdded).toBe(4)
-    // 扫描完成后聚合被重新拉取
-    expect(mocks.usageSummary.mock.calls.length).toBeGreaterThanOrEqual(16)
+    expect(store.lastScanEventsAdded).toBe(3)
+    // 扫描完成后聚合被重新拉取（init 一轮 3 条 summary + 扫描后一轮 3 条）
+    expect(mocks.usageSummary.mock.calls.length).toBeGreaterThanOrEqual(6)
   })
 
   it('重复 init 只执行一次', async () => {
@@ -113,7 +100,7 @@ describe('usage store 聚合加载', () => {
     expect(mocks.scanUsageLogs).toHaveBeenCalledTimes(1)
   })
 
-  it('扫描命令失败时合成全平台失败报告，错误经 lastScanFailures 展示，不影响已加载数据', async () => {
+  it('扫描命令失败时合成失败报告，错误经 lastScanFailures 展示，不影响已加载数据', async () => {
     mocks.scanUsageLogs.mockRejectedValue(new Error('数据库锁定'))
     const store = useUsageStore()
     await store.init()
@@ -123,27 +110,13 @@ describe('usage store 聚合加载', () => {
     expect(store.todaySummary).not.toBeNull()
   })
 
-  it('单平台扫描失败不算整体失败，只记录到分平台报告', async () => {
-    mocks.scanUsageLogs.mockResolvedValue([
-      scanReportOf('kimi', 3),
-      scanReportOf('mimo', 0, 'MiMo 日志目录不存在'),
-    ])
+  it('扫描失败不算整体失败，只记录到分平台报告', async () => {
+    mocks.scanUsageLogs.mockResolvedValue([scanReportOf('kimi', 0, 'Kimi 日志目录不存在')])
     const store = useUsageStore()
     await store.init()
     await vi.waitFor(() => expect(store.scanning).toBe(false))
     expect(store.lastScanFailures).toHaveLength(1)
-    expect(store.lastScanFailures[0].platform).toBe('mimo')
-  })
-
-  it('全部平台扫描失败时逐平台进入 lastScanFailures', async () => {
-    mocks.scanUsageLogs.mockResolvedValue([
-      scanReportOf('kimi', 0, '目录不存在'),
-      scanReportOf('mimo', 0, '目录不存在'),
-    ])
-    const store = useUsageStore()
-    await store.init()
-    await vi.waitFor(() => expect(store.scanning).toBe(false))
-    expect(store.lastScanFailures.map((r) => r.platform)).toEqual(['kimi', 'mimo'])
+    expect(store.lastScanFailures[0].platform).toBe('kimi')
   })
 
   it('加载失败时不抛异常、不置 initialized、错误进 loadError，且不启动后台扫描', async () => {
@@ -184,50 +157,20 @@ describe('usage store 聚合加载', () => {
     // 不重复触发初始化扫描
     expect(mocks.scanUsageLogs).toHaveBeenCalledTimes(1)
   })
-
-  it('扫描后 MiMo 已配置套餐时自动重算配额（纯本地推算），未配置则跳过', async () => {
-    mocks.platformAccountGet.mockImplementation((platform: Platform) =>
-      Promise.resolve(
-        platform === 'mimo'
-          ? {
-              id: 1,
-              platform: 'mimo',
-              name: 'MiMo 套餐',
-              api_base: null,
-              credential_ref: null,
-              has_credential: false,
-              quota_total: 1000,
-              quota_cycle: 'monthly',
-              enabled: true,
-            }
-          : null,
-      ),
-    )
-    const store = useUsageStore()
-    await store.init()
-    await vi.waitFor(() => expect(store.scanning).toBe(false))
-    expect(mocks.quotaRefresh).toHaveBeenCalledWith('mimo')
-
-    vi.clearAllMocks()
-    const store2 = useUsageStore()
-    await store2.init()
-    await vi.waitFor(() => expect(store2.scanning).toBe(false))
-    expect(mocks.quotaRefresh).not.toHaveBeenCalled()
-  })
 })
 
 describe('平台过滤切换', () => {
-  it('setActiveFilter 按新平台重取聚合，summary 请求带平台参数', async () => {
+  it('setActiveFilter 按新过滤重取聚合，summary 请求带平台参数', async () => {
     const store = useUsageStore()
     await store.init()
     await vi.waitFor(() => expect(store.scanning).toBe(false))
     vi.clearAllMocks()
 
-    await store.setActiveFilter('mimo')
-    expect(store.activeFilter).toBe('mimo')
-    expect(mocks.usageSummary).toHaveBeenCalledWith('mimo', 'Day')
-    expect(mocks.usageSeries).toHaveBeenCalledWith('mimo', 'Day')
-    expect(mocks.usageByProject).toHaveBeenCalledWith('mimo', 'Day')
+    await store.setActiveFilter('all')
+    expect(store.activeFilter).toBe('all')
+    expect(mocks.usageSummary).toHaveBeenCalledWith('all', 'Day')
+    expect(mocks.usageSeries).toHaveBeenCalledWith('all', 'Day')
+    expect(mocks.usageByProject).toHaveBeenCalledWith('all', 'Day')
   })
 
   it('切换到相同过滤不重复请求', async () => {
@@ -236,7 +179,7 @@ describe('平台过滤切换', () => {
     await vi.waitFor(() => expect(store.scanning).toBe(false))
     vi.clearAllMocks()
 
-    await store.setActiveFilter('all')
+    await store.setActiveFilter('kimi')
     expect(mocks.usageSummary).not.toHaveBeenCalled()
   })
 })
@@ -250,9 +193,9 @@ describe('趋势范围切换', () => {
 
     await store.setTrendRange('Week')
     expect(store.trendRange).toBe('Week')
-    expect(mocks.usageSeries).toHaveBeenCalledWith('all', 'Week')
-    expect(mocks.usageByProject).toHaveBeenCalledWith('all', 'Week')
-    expect(mocks.usageByModel).toHaveBeenCalledWith('all', 'Week')
+    expect(mocks.usageSeries).toHaveBeenCalledWith('kimi', 'Week')
+    expect(mocks.usageByProject).toHaveBeenCalledWith('kimi', 'Week')
+    expect(mocks.usageByModel).toHaveBeenCalledWith('kimi', 'Week')
     expect(store.series?.range).toBe('Week')
   })
 
@@ -285,16 +228,16 @@ describe('趋势范围切换', () => {
 })
 
 describe('聚合数据 stale-write 竞态（loadAggregates 与 setTrendRange 共用请求序号）', () => {
-  it('切平台 Tab 后，旧 filter 的在途趋势响应被丢弃，不覆盖新 Tab 数据', async () => {
+  it('切平台过滤后，旧 filter 的在途趋势响应被丢弃，不覆盖新过滤数据', async () => {
     const store = useUsageStore()
     await store.init()
     await vi.waitFor(() => expect(store.scanning).toBe(false))
 
-    // 旧 filter（all）的 Week 序列响应慢（手动控制），新 filter 的请求立即返回；
-    // byProject 用 key 标记来源平台，便于区分新旧数据
+    // 旧 filter（kimi）的 Week 序列响应慢（手动控制），新 filter 的请求立即返回；
+    // byProject 用 key 标记来源过滤，便于区分新旧数据
     let resolveStale!: (v: UsageSeries) => void
     mocks.usageSeries.mockImplementation((platform: string, range: UsageRange) => {
-      if (platform === 'all' && range === 'Week') {
+      if (platform === 'kimi' && range === 'Week') {
         return new Promise((resolve) => {
           resolveStale = resolve
         })
@@ -318,27 +261,27 @@ describe('聚合数据 stale-write 竞态（loadAggregates 与 setTrendRange 共
     )
 
     const weekReq = store.setTrendRange('Week')
-    const tabReq = store.setActiveFilter('mimo')
-    await tabReq
-    expect(store.byProject[0]?.key).toBe('proj-mimo')
+    const filterReq = store.setActiveFilter('all')
+    await filterReq
+    expect(store.byProject[0]?.key).toBe('proj-all')
 
     // 旧 filter 的慢响应随后落地，应被丢弃
     resolveStale({ range: 'Week', points: [] })
     await weekReq
-    expect(store.activeFilter).toBe('mimo')
-    expect(store.byProject[0]?.key).toBe('proj-mimo')
+    expect(store.activeFilter).toBe('all')
+    expect(store.byProject[0]?.key).toBe('proj-all')
     expect(store.loadError).toBeNull()
   })
 
-  it('切趋势范围后，旧 filter 的在途聚合响应被丢弃，不覆盖新范围数据', async () => {
+  it('切趋势范围后，旧范围的在途聚合响应被丢弃，不覆盖新范围数据', async () => {
     const store = useUsageStore()
     await store.init()
     await vi.waitFor(() => expect(store.scanning).toBe(false))
 
-    // 切 Tab 触发的 loadAggregates（mimo + 当前 Day 范围）序列响应慢，随后的切范围请求立即返回
+    // 切过滤触发的 loadAggregates（all + 当前 Day 范围）序列响应慢，随后的切范围请求立即返回
     let resolveStale!: (v: UsageSeries) => void
     mocks.usageSeries.mockImplementation((platform: string, range: UsageRange) => {
-      if (platform === 'mimo' && range === 'Day') {
+      if (platform === 'all' && range === 'Day') {
         return new Promise((resolve) => {
           resolveStale = resolve
         })
@@ -346,14 +289,14 @@ describe('聚合数据 stale-write 竞态（loadAggregates 与 setTrendRange 共
       return Promise.resolve({ range, points: [] })
     })
 
-    const tabReq = store.setActiveFilter('mimo')
+    const filterReq = store.setActiveFilter('all')
     const monthReq = store.setTrendRange('Month')
     await monthReq
     expect(store.series?.range).toBe('Month')
 
-    // 旧 filter 的慢聚合响应随后落地，应被丢弃
+    // 旧范围的慢聚合响应随后落地，应被丢弃
     resolveStale({ range: 'Day', points: [] })
-    await tabReq
+    await filterReq
     expect(store.trendRange).toBe('Month')
     expect(store.series?.range).toBe('Month')
     expect(store.loadError).toBeNull()
@@ -361,7 +304,7 @@ describe('聚合数据 stale-write 竞态（loadAggregates 与 setTrendRange 共
 })
 
 describe('配额刷新', () => {
-  it('刷新成功更新对应平台快照并清空错误', async () => {
+  it('刷新成功更新快照并清空错误', async () => {
     const snapshot: QuotaSnapshot = {
       platform: 'kimi',
       total: null,
@@ -381,14 +324,13 @@ describe('配额刷新', () => {
     expect(store.quotaLoading.kimi).toBe(false)
   })
 
-  it('未配置 key 时刷新失败，错误文案进该平台 quotaErrors，不影响其他平台', async () => {
-    mocks.quotaRefresh.mockRejectedValue('尚未配置 deepseek 平台账户')
+  it('未配置 key 时刷新失败，错误文案进 quotaErrors', async () => {
+    mocks.quotaRefresh.mockRejectedValue('尚未配置 kimi 平台账户')
     const store = useUsageStore()
-    await store.refreshQuota('deepseek')
-    expect(store.quotas.deepseek ?? null).toBeNull()
-    expect(store.quotaErrors.deepseek?.kind).toBe('internal')
-    expect(store.quotaErrors.deepseek?.message).toContain('尚未配置')
-    expect(store.quotaErrors.kimi ?? null).toBeNull()
+    await store.refreshQuota('kimi')
+    expect(store.quotas.kimi ?? null).toBeNull()
+    expect(store.quotaErrors.kimi?.kind).toBe('internal')
+    expect(store.quotaErrors.kimi?.message).toContain('尚未配置')
   })
 
   it('401 类失败被归类为 unauthorized', async () => {
@@ -396,25 +338,6 @@ describe('配额刷新', () => {
     const store = useUsageStore()
     await store.refreshQuota('kimi')
     expect(store.quotaErrors.kimi).toEqual({ kind: 'unauthorized', message: 'token 无效' })
-  })
-})
-
-describe('parseQuotaTotalInput（MiMo 手录总额校验）', () => {
-  it('空串 / 纯空白 = 不配置套餐（null）', () => {
-    expect(parseQuotaTotalInput('')).toBeNull()
-    expect(parseQuotaTotalInput('   ')).toBeNull()
-  })
-
-  it('合法正数解析为数值', () => {
-    expect(parseQuotaTotalInput('1000')).toBe(1000)
-    expect(parseQuotaTotalInput(' 58.5 ')).toBe(58.5)
-  })
-
-  it('NaN / 非正数 / 无穷大均为非法（undefined），防止 NaN 序列化成 null 清空已录总额', () => {
-    expect(parseQuotaTotalInput('abc')).toBeUndefined()
-    expect(parseQuotaTotalInput('0')).toBeUndefined()
-    expect(parseQuotaTotalInput('-100')).toBeUndefined()
-    expect(parseQuotaTotalInput('Infinity')).toBeUndefined()
   })
 })
 
@@ -437,40 +360,11 @@ describe('配额 detail_json 解析', () => {
     expect(detail?.codingError).toBeNull()
   })
 
-  it('mimo：progress / period_start / unit 解析；超量 progress > 1 不截断', () => {
-    const detail = parseMimoQuotaDetail({
-      platform: 'mimo',
-      total: 1000,
-      used: 1200,
-      remaining: -200,
-      detail_json:
-        '{"quota_cycle":"monthly","period_start":"2026-01-01","progress":1.2,"unit":"credit"}',
-      fetched_at: '2026-01-01T00:00:00Z',
-    })
-    expect(detail?.progress).toBe(1.2)
-    expect(detail?.periodStart).toBe('2026-01-01')
-    expect(detail?.unit).toBe('credit')
-  })
-
-  it('deepseek：币种分项解析', () => {
-    const detail = parseDeepseekQuotaDetail({
-      platform: 'deepseek',
-      total: null,
-      used: null,
-      remaining: 58.5,
-      detail_json:
-        '{"is_available":true,"balances":[{"currency":"CNY","total":58.5,"granted":10,"topped_up":48.5}]}',
-      fetched_at: '2026-01-01T00:00:00Z',
-    })
-    expect(detail?.isAvailable).toBe(true)
-    expect(detail?.balances[0].currency).toBe('CNY')
-  })
-
   it('非法 JSON / 空快照返回 null，不抛出', () => {
     expect(parseKimiQuotaDetail(null)).toBeNull()
     expect(
-      parseMimoQuotaDetail({
-        platform: 'mimo',
+      parseKimiQuotaDetail({
+        platform: 'kimi',
         total: null,
         used: null,
         remaining: null,

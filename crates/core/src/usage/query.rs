@@ -332,26 +332,18 @@ mod tests {
         let (_tmp, pool) = temp_pool().await;
         let now = Utc::now().timestamp_millis();
         add_event(&pool, "kimi", "kimi-code", now, 100).await;
-        add_event(&pool, "mimo", "mimocode", now, 200).await;
-        add_event(&pool, "omp", "omp", now, 300).await;
+        // 泛化 SQL 不感知平台枚举（2026-10-02 起枚举只有 kimi，schema 的 platform 维度保留）：
+        // 用裸字符串插入其他平台行，验证 all 合计与单平台过滤在 SQL 层仍然成立
+        add_event(&pool, "other", "other-cli", now, 200).await;
 
         let all = summary(&pool, None, UsageRange::Day).await.unwrap();
-        assert_eq!(all.totals.input_other, 600);
+        assert_eq!(all.totals.input_other, 300);
 
         // 单平台隔离
         let kimi = summary(&pool, Some(Platform::Kimi), UsageRange::Day)
             .await
             .unwrap();
         assert_eq!(kimi.totals.input_other, 100);
-        let mimo = summary(&pool, Some(Platform::Mimo), UsageRange::Day)
-            .await
-            .unwrap();
-        assert_eq!(mimo.totals.input_other, 200);
-        // 无数据的平台返回全 0 而不是报错
-        let ds = summary(&pool, Some(Platform::Deepseek), UsageRange::Day)
-            .await
-            .unwrap();
-        assert_eq!(ds.totals.input_other, 0);
     }
 
     #[tokio::test]
@@ -359,7 +351,7 @@ mod tests {
         let (_tmp, pool) = temp_pool().await;
         let now = Utc::now().timestamp_millis();
         add_event(&pool, "kimi", "kimi-code", now, 100).await;
-        add_event(&pool, "omp", "omp", now, 300).await;
+        add_event(&pool, "other", "other-cli", now, 300).await;
 
         // 跨平台分组：同名 project/model 跨平台合并（group key 不带平台维度）
         let groups = usage_by_project(&pool, None, UsageRange::Day)
@@ -373,10 +365,10 @@ mod tests {
         assert_eq!(kimi_only[0].totals.input_other, 100);
 
         // Last5Hours 走事件表，平台过滤同样生效
-        let last5 = summary(&pool, Some(Platform::Omp), UsageRange::Last5Hours)
+        let last5 = summary(&pool, Some(Platform::Kimi), UsageRange::Last5Hours)
             .await
             .unwrap();
-        assert_eq!(last5.totals.input_other, 300);
+        assert_eq!(last5.totals.input_other, 100);
 
         let series = usage_series(&pool, None, UsageRange::Day).await.unwrap();
         assert_eq!(

@@ -1,8 +1,9 @@
-//! M1 多平台用量聚合的业务编排层：扫描调度 / 聚合查询 / 配额刷新 / 账户配置。
+//! M1 用量聚合的业务编排层：扫描调度 / 聚合查询 / 配额刷新 / 账户配置。
 //! Tauri commands 与 hub HTTP 接口都是本模块的薄壳，不写重复业务逻辑。
 //!
-//! UsageService 持有单一 SQLite 连接池，三个平台的 store（kimi/mimo/omp）经
-//! from_pool 共享该池（各自的扫描互斥锁仍在 store 内，防并发双计）。
+//! UsageService 持有单一 SQLite 连接池，kimi 平台的 store 经 from_pool 共享该池
+//! （扫描互斥锁仍在 store 内，防并发双计）。
+//! 2026-10-02 决策：当前只统计 Kimi Code（mimo/omp/deepseek 已砍，待回归时从 git 历史恢复）。
 
 pub mod account;
 pub mod query;
@@ -14,20 +15,16 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePool};
 
 use crate::keystore::SecretStore;
 use crate::kimicode::KimiStore;
-use crate::mimocode::MimoStore;
 use crate::models::{
     CommandError, Platform, PlatformAccountInfo, PlatformAccountInput, PlatformFilter,
     PlatformScanReport, QuotaSnapshot, UsageGroup, UsageRange, UsageSeries, UsageSummary,
 };
-use crate::omp::OmpStore;
 
-/// M1 业务服务：一个实例管全部平台的用量统计
+/// M1 业务服务：一个实例管全部平台的用量统计（当前仅 Kimi）
 #[derive(Debug, Clone)]
 pub struct UsageService {
     pool: SqlitePool,
     kimi: KimiStore,
-    mimo: MimoStore,
-    omp: OmpStore,
 }
 
 impl UsageService {
@@ -42,8 +39,6 @@ impl UsageService {
         crate::db::migrate(&pool).await?;
         Ok(Self {
             kimi: KimiStore::from_pool(pool.clone()),
-            mimo: MimoStore::from_pool(pool.clone()),
-            omp: OmpStore::from_pool(pool.clone()),
             pool,
         })
     }
@@ -54,7 +49,7 @@ impl UsageService {
     }
 
     /// 增量扫描日志（scan_usage_logs 命令）：platform 为 None 时扫描全部有日志的平台
-    /// （kimi / mimo / omp；deepseek 无本地日志）。单平台失败不影响其他平台，
+    /// （当前只有 kimi）。单平台失败不影响其他平台，
     /// 各自结果/错误体现在返回值的每个 PlatformScanReport 里。
     /// kimi_sessions_dir 为 Kimi 日志目录覆盖（M6 设置项，None 走默认发现）。
     pub async fn scan(
@@ -64,7 +59,7 @@ impl UsageService {
     ) -> Vec<PlatformScanReport> {
         let platforms: Vec<Platform> = match platform {
             Some(p) => vec![p],
-            None => vec![Platform::Kimi, Platform::Mimo, Platform::Omp],
+            None => vec![Platform::Kimi],
         };
         let mut results = Vec::with_capacity(platforms.len());
         for p in platforms {
@@ -103,22 +98,6 @@ impl UsageService {
                     Err(e) => fail(e.to_string()),
                 }
             }
-            Platform::Mimo => match crate::mimocode::default_db_path() {
-                // 文件缺失由 MimoStore 内部降级为空报告（未安装 MiMo Code 是常态）
-                Ok(db) => match self.mimo.scan_and_record(&db).await {
-                    Ok(r) => ok(r),
-                    Err(e) => fail(e.to_string()),
-                },
-                Err(e) => fail(e.to_string()),
-            },
-            Platform::Omp => match crate::omp::default_sessions_dir() {
-                Ok(dir) => match self.omp.scan_and_record(&dir).await {
-                    Ok(r) => ok(r),
-                    Err(e) => fail(e.to_string()),
-                },
-                Err(e) => fail(e.to_string()),
-            },
-            Platform::Deepseek => fail("DeepSeek 无本地日志（仅官方余额接口）".to_string()),
         }
     }
 
@@ -205,10 +184,7 @@ impl UsageService {
     ) -> Result<(), CommandError> {
         account::set_row(&self.pool, platform, input).await?;
         if let Some(key) = api_key.filter(|k| !k.is_empty()) {
-            let cred_ref = account::default_credential_ref(platform).ok_or_else(|| {
-                CommandError::unavailable(format!("{platform} 平台不支持 API 凭据"))
-            })?;
-            secrets.set(cred_ref, key)?;
+            secrets.set(account::default_credential_ref(platform), key)?;
         }
         Ok(())
     }
@@ -249,7 +225,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scan_all_platforms_isolates_failures() {
+    async fn scan_kimi_records_events_and_isolates_failure() {
         let tmp = tempfile::tempdir().unwrap();
         let service = temp_service(&tmp).await;
         let now = chrono::Utc::now().timestamp_millis();
@@ -261,39 +237,29 @@ mod tests {
             &[kimi_usage_line(now, 100)],
         );
 
-        // 全平台扫描：kimi 用覆盖目录扫到 1 条；mimo/omp 的默认路径在本机可能不存在
-        // （缺失时降级为空报告），无论如何都不应报错中断其他平台
+        // 全平台扫描（当前只有 kimi）：覆盖目录扫到 1 条
         let results = service.scan(None, Some(tmp.path())).await;
-        assert_eq!(results.len(), 3);
-        let kimi = results
-            .iter()
-            .find(|r| r.platform == Platform::Kimi)
-            .unwrap();
+        assert_eq!(results.len(), 1);
+        let kimi = &results[0];
+        assert_eq!(kimi.platform, Platform::Kimi);
         assert_eq!(kimi.error, None);
         assert_eq!(kimi.report.as_ref().unwrap().events_added, 1);
-        for r in &results {
-            assert!(r.error.is_none(), "{} 不应失败: {:?}", r.platform, r.error);
-        }
 
-        // 跨平台合计能看到 kimi 的事件
+        // 覆盖目录不存在：优雅降级为空报告（未安装/未生成日志是常态），不算失败
+        let results = service
+            .scan(Some(Platform::Kimi), Some(Path::new("Z:/nonexistent")))
+            .await;
+        assert_eq!(results.len(), 1);
+        let report = results[0].report.as_ref().unwrap();
+        assert_eq!(report.files_found, 0);
+        assert_eq!(results[0].error, None);
+
+        // 合计能看到 kimi 的事件
         let summary = service
             .summary(PlatformFilter::All, UsageRange::Day)
             .await
             .unwrap();
         assert_eq!(summary.totals.input_other, 100);
-    }
-
-    #[tokio::test]
-    async fn scan_single_platform_and_deepseek_error_entry() {
-        let tmp = tempfile::tempdir().unwrap();
-        let service = temp_service(&tmp).await;
-
-        // 指定 deepseek：无本地日志，返回错误条目而不 panic
-        let results = service.scan(Some(Platform::Deepseek), None).await;
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].platform, Platform::Deepseek);
-        assert!(results[0].report.is_none());
-        assert!(results[0].error.as_deref().unwrap().contains("无本地日志"));
     }
 
     #[tokio::test]
@@ -342,12 +308,5 @@ mod tests {
                 .as_deref(),
             Some("sk-abc")
         );
-
-        // mimo 无需凭据：传了 api_key 报 unavailable
-        let err = service
-            .account_set(Platform::Mimo, &input, Some("x"), &secrets)
-            .await
-            .unwrap_err();
-        assert_eq!(err.kind, "unavailable");
     }
 }

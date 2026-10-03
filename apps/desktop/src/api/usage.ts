@@ -43,7 +43,7 @@ export function usageSeries(platform: PlatformFilter, range: UsageRange): Promis
   return invoke('usage_series', { platform, range })
 }
 
-/** 拉取/重算平台配额并写快照（MiMo 为本地推算） */
+/** 拉取/重算平台配额并写快照 */
 export function quotaRefresh(platform: Platform): Promise<QuotaSnapshot> {
   return invoke('quota_refresh', { platform })
 }

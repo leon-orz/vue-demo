@@ -46,10 +46,10 @@ describe('api/usage.ts invoke 契约', () => {
     await usageApi.usageByProject('kimi', 'Week')
     expectLastCall('usage_by_project', ['platform', 'range'])
 
-    await usageApi.usageByModel('mimo', 'Month')
+    await usageApi.usageByModel('kimi', 'Month')
     expectLastCall('usage_by_model', ['platform', 'range'])
 
-    await usageApi.usageSeries('deepseek', 'Last5Hours')
+    await usageApi.usageSeries('all', 'Last5Hours')
     expectLastCall('usage_series', ['platform', 'range'])
     expect((invokeMock.mock.lastCall?.[1] as Record<string, unknown>).range).toBe('Last5Hours')
   })
@@ -58,10 +58,10 @@ describe('api/usage.ts invoke 契约', () => {
     await usageApi.quotaRefresh('kimi')
     expectLastCall('quota_refresh', ['platform'])
 
-    await usageApi.quotaLatest('mimo')
+    await usageApi.quotaLatest('kimi')
     expectLastCall('quota_latest', ['platform'])
 
-    await usageApi.platformAccountGet('deepseek')
+    await usageApi.platformAccountGet('kimi')
     expectLastCall('platform_account_get', ['platform'])
   })
 

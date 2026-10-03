@@ -3,7 +3,7 @@ import type { Platform } from "./Platform";
 
 /**
  * 配额/余额历史快照（对应 quota_snapshot 表，只追加）。
- * Kimi 窗口余量、DeepSeek 余额、MiMo 推算进度统一落此模型；
+ * Kimi 窗口余量与余额统一落此模型；
  * total/used/remaining 均可空（如 Kimi 滚动窗口只有 remaining），平台特有明细放 detail_json。
  */
 export type QuotaSnapshot = { platform: Platform, total: number | null, used: number | null, remaining: number | null, 

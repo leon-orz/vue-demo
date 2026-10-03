@@ -26,7 +26,7 @@ pub use store::KimiStore;
 pub const KIMI_CREDENTIAL_REF: &str = "kimi-openplatform-api-key";
 
 /// usage_event / usage_daily / log_file 表中本模块写入的 cli 列取值
-/// （platform 列固定为 Platform::Kimi；mimocode/omp parser 落库时使用各自的 cli 标识）
+/// （platform 列固定为 Platform::Kimi）
 pub const KIMI_CLI: &str = "kimi-code";
 
 #[derive(Debug, Error)]

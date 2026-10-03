@@ -3,13 +3,12 @@ import type { Platform } from "./Platform";
 
 /**
  * 归一化后的单条用量事件（对应 usage_event 表）。
- * 各平台 parser 的产物统一为此模型：ts 为 Unix 毫秒时间戳；
- * cost 可空——mimocode/omp 日志自带成本字段时保留（MiMo 套餐进度推算依赖它），
- * wire.jsonl 无此字段则为 null，估算成本仍由单价表计算。
+ * 各平台 parser 的产物统一为此模型：ts 为 Unix 毫秒时间戳；cost 可空——
+ * 日志自带成本字段时保留，wire.jsonl 无此字段则为 null，估算成本仍由单价表计算。
  */
 export type UsageEvent = { platform: Platform, 
 /**
- * CLI 来源标识（如 "kimi-code" / "mimocode" / "omp"），与 usage_event.cli 列一致
+ * CLI 来源标识（当前为 "kimi-code"），与 usage_event.cli 列一致
  */
 cli: string, 
 /**

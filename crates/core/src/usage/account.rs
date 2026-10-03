@@ -1,18 +1,14 @@
 //! 平台账户配置（platform_account 表）与配额快照（quota_snapshot 表）的读写。
-//! 凭据本体只进 keyring（SecretStore），表里只存 credential_ref 引用名；
-//! MiMo 用 quota_total / quota_cycle 手录套餐月度总额与计费周期。
+//! 凭据本体只进 keyring（SecretStore），表里只存 credential_ref 引用名。
 
 use sqlx::sqlite::SqlitePool;
 
-use crate::adapters::{deepseek, kimi};
+use crate::adapters::kimi;
 use crate::keystore::SecretStore;
 use crate::kimicode::KIMI_CREDENTIAL_REF;
 use crate::models::{
     CommandError, Platform, PlatformAccountInfo, PlatformAccountInput, QuotaSnapshot,
 };
-
-/// DeepSeek 平台 key 在 keyring 里的默认引用名
-pub const DEEPSEEK_CREDENTIAL_REF: &str = "deepseek-api-key";
 
 /// 账户表行（内部类型；对前端暴露的是 PlatformAccountInfo，has_credential 需查 keyring 补充）
 #[derive(Debug, Clone)]
@@ -27,31 +23,23 @@ pub struct AccountRow {
     pub enabled: bool,
 }
 
-/// 各平台的默认 credential_ref（新建账户行时使用；kimi 沿用旧引用名保证 keyring 既有凭据不失效）
-pub fn default_credential_ref(platform: Platform) -> Option<&'static str> {
+/// 平台的默认 credential_ref（新建账户行时使用；kimi 沿用旧引用名保证 keyring 既有凭据不失效）
+pub fn default_credential_ref(platform: Platform) -> &'static str {
     match platform {
-        Platform::Kimi => Some(KIMI_CREDENTIAL_REF),
-        Platform::Deepseek => Some(DEEPSEEK_CREDENTIAL_REF),
-        // mimo 走本地推算、omp 无配额接口，都不需要凭据
-        Platform::Mimo | Platform::Omp => None,
+        Platform::Kimi => KIMI_CREDENTIAL_REF,
     }
 }
 
-/// 各平台的默认 api_base（账户行未配置时的兜底）
+/// 平台的默认 api_base（账户行未配置时的兜底）
 pub fn default_api_base(platform: Platform) -> Option<&'static str> {
     match platform {
         Platform::Kimi => Some(kimi::DEFAULT_API_BASE),
-        Platform::Deepseek => Some(deepseek::DEFAULT_API_BASE),
-        Platform::Mimo | Platform::Omp => None,
     }
 }
 
 fn default_name(platform: Platform) -> &'static str {
     match platform {
         Platform::Kimi => "Kimi 开放平台",
-        Platform::Mimo => "MiMo Code",
-        Platform::Omp => "oh-my-pi",
-        Platform::Deepseek => "DeepSeek",
     }
 }
 
@@ -301,24 +289,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mimo_account_records_quota_and_needs_no_credential() {
-        let (_tmp, pool) = temp_pool().await;
-        let secrets = MemoryStore::default();
-        let mut input = input("MiMo 套餐");
-        input.quota_total = Some(1000.0);
-        input.quota_cycle = Some("monthly".to_string());
-        set_row(&pool, Platform::Mimo, &input).await.unwrap();
-        let info = get_info(&pool, &secrets, Platform::Mimo)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(info.quota_total, Some(1000.0));
-        assert_eq!(info.quota_cycle.as_deref(), Some("monthly"));
-        assert_eq!(info.credential_ref, None);
-        assert!(!info.has_credential);
-    }
-
-    #[tokio::test]
     async fn quota_snapshot_save_and_latest() {
         let (_tmp, pool) = temp_pool().await;
         assert!(latest_quota_snapshot(&pool, Platform::Kimi)
@@ -341,16 +311,6 @@ mod tests {
         };
         save_quota_snapshot(&pool, &snap1).await.unwrap();
         save_quota_snapshot(&pool, &snap2).await.unwrap();
-        // 其他平台快照不影响
-        save_quota_snapshot(
-            &pool,
-            &QuotaSnapshot {
-                platform: Platform::Deepseek,
-                ..snap1.clone()
-            },
-        )
-        .await
-        .unwrap();
 
         let latest = latest_quota_snapshot(&pool, Platform::Kimi)
             .await

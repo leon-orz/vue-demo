@@ -3,8 +3,7 @@ import type { Platform } from "./Platform";
 
 /**
  * 增量解析游标（对应 log_file 表）：每个平台各自记录其日志文件的读取位置。
- * size/mtime（Unix 毫秒）变化即从头重扫；offset 记录上次消费到的位置
- * （mimocode 为行游标，语义由对应 parser 解释）。
+ * size/mtime（Unix 毫秒）变化即从头重扫；offset 记录上次消费到的位置。
  */
 export type LogFileCursor = { platform: Platform, path: string, offset: number, size: number, 
 /**

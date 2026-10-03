@@ -1,23 +1,20 @@
-//! 多平台用量聚合（M1）数据模型。字段与《02-开发计划》M1 节数据表设计对齐，
+//! 用量聚合（M1）数据模型。字段与《02-开发计划》M1 节数据表设计对齐，
 //! 对应 migration 0003 的 log_file / usage_event / usage_daily / quota_snapshot / platform_account。
+//! 2026-10-02 决策：M1 当前只统计 Kimi Code，Platform 收缩为单一平台（其他平台待回归时
+//! 从 git 历史恢复）；schema 与命令层的 platform 维度保持泛化不动。
 //! TS 类型由 ts-rs 生成到 packages/core-types/bindings/，禁止手改生成物。
 
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 /// 用量来源平台。序列化为小写字符串，与数据表 platform 列取值一致。
+/// 当前只有 Kimi；枚举保留以便后续平台回归（omp/dsh/MiMo 从 git 历史恢复）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(export, export_to = "../../../packages/core-types/bindings/")]
 pub enum Platform {
     /// Kimi（kimi-code CLI 日志 + 开放平台配额）
     Kimi,
-    /// MiMo Code（mimocode.db 本地日志 + 手录套餐）
-    Mimo,
-    /// oh-my-pi（omp，JSONL 日志）
-    Omp,
-    /// DeepSeek（官方余额 API，无本地日志）
-    Deepseek,
 }
 
 impl Platform {
@@ -25,9 +22,6 @@ impl Platform {
     pub fn as_str(self) -> &'static str {
         match self {
             Platform::Kimi => "kimi",
-            Platform::Mimo => "mimo",
-            Platform::Omp => "omp",
-            Platform::Deepseek => "deepseek",
         }
     }
 }
@@ -47,9 +41,6 @@ pub enum PlatformFilter {
     /// 跨平台合计
     All,
     Kimi,
-    Mimo,
-    Omp,
-    Deepseek,
 }
 
 impl PlatformFilter {
@@ -58,9 +49,6 @@ impl PlatformFilter {
         match self {
             PlatformFilter::All => None,
             PlatformFilter::Kimi => Some(Platform::Kimi),
-            PlatformFilter::Mimo => Some(Platform::Mimo),
-            PlatformFilter::Omp => Some(Platform::Omp),
-            PlatformFilter::Deepseek => Some(Platform::Deepseek),
         }
     }
 }
@@ -152,14 +140,13 @@ pub struct UsageSeries {
 }
 
 /// 归一化后的单条用量事件（对应 usage_event 表）。
-/// 各平台 parser 的产物统一为此模型：ts 为 Unix 毫秒时间戳；
-/// cost 可空——mimocode/omp 日志自带成本字段时保留（MiMo 套餐进度推算依赖它），
-/// wire.jsonl 无此字段则为 null，估算成本仍由单价表计算。
+/// 各平台 parser 的产物统一为此模型：ts 为 Unix 毫秒时间戳；cost 可空——
+/// 日志自带成本字段时保留，wire.jsonl 无此字段则为 null，估算成本仍由单价表计算。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../packages/core-types/bindings/")]
 pub struct UsageEvent {
     pub platform: Platform,
-    /// CLI 来源标识（如 "kimi-code" / "mimocode" / "omp"），与 usage_event.cli 列一致
+    /// CLI 来源标识（当前为 "kimi-code"），与 usage_event.cli 列一致
     pub cli: String,
     /// Unix 毫秒时间戳（< 2^53，导出为 number）
     #[ts(type = "number")]
@@ -180,8 +167,7 @@ pub struct UsageEvent {
 }
 
 /// 增量解析游标（对应 log_file 表）：每个平台各自记录其日志文件的读取位置。
-/// size/mtime（Unix 毫秒）变化即从头重扫；offset 记录上次消费到的位置
-/// （mimocode 为行游标，语义由对应 parser 解释）。
+/// size/mtime（Unix 毫秒）变化即从头重扫；offset 记录上次消费到的位置。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../packages/core-types/bindings/")]
 pub struct LogFileCursor {
@@ -199,7 +185,7 @@ pub struct LogFileCursor {
 }
 
 /// 配额/余额历史快照（对应 quota_snapshot 表，只追加）。
-/// Kimi 窗口余量、DeepSeek 余额、MiMo 推算进度统一落此模型；
+/// Kimi 窗口余量与余额统一落此模型；
 /// total/used/remaining 均可空（如 Kimi 滚动窗口只有 remaining），平台特有明细放 detail_json。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../packages/core-types/bindings/")]
@@ -215,8 +201,7 @@ pub struct QuotaSnapshot {
 }
 
 /// 平台账户配置视图（platform_account_get 返回值，对应 platform_account 表）。
-/// 凭据本体只进 keyring，此处仅有引用与是否存在标记；
-/// MiMo 用 quota_total/quota_cycle 手录套餐月度总额与计费周期。
+/// 凭据本体只进 keyring，此处仅有引用与是否存在标记。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../packages/core-types/bindings/")]
 pub struct PlatformAccountInfo {
@@ -230,7 +215,7 @@ pub struct PlatformAccountInfo {
     /// keyring 中是否已存有凭据
     pub has_credential: bool,
     pub quota_total: Option<f64>,
-    /// 计费周期（如 "monthly"），MiMo 套餐用
+    /// 计费周期（如 "monthly"）
     pub quota_cycle: Option<String>,
     pub enabled: bool,
 }
@@ -273,12 +258,13 @@ pub struct ScanReport {
 
 /// 单平台扫描结果（scan_usage_logs 返回值元素）：单平台失败不影响其他平台，
 /// 失败时 report 为 None、error 带可读原因；成功时 error 为 None。
+/// 当前只有 Kimi 一路，泛化结构保留给后续回归的平台。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../packages/core-types/bindings/")]
 pub struct PlatformScanReport {
     pub platform: Platform,
     pub report: Option<ScanReport>,
-    /// 面向用户的失败原因（如 "DeepSeek 无本地日志"）
+    /// 面向用户的失败原因（如 "Kimi 日志目录不存在"）
     pub error: Option<String>,
 }
 
@@ -309,7 +295,7 @@ mod tests {
     #[test]
     fn platform_serializes_lowercase() {
         assert_eq!(serde_json::to_string(&Platform::Kimi).unwrap(), "\"kimi\"");
-        assert_eq!(Platform::Omp.as_str(), "omp");
+        assert_eq!(Platform::Kimi.as_str(), "kimi");
     }
 
     #[test]

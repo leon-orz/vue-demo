@@ -1,5 +1,6 @@
 //! 文件游标日志的公共入库骨架：游标 upsert / 事件追加 / 截断整批重建 / 日聚合重算 /
-//! 扫描互斥锁，kimicode 与 omp 的 store 都是它的薄壳（仅差 platform / cli 常量与扫描函数）。
+//! 扫描互斥锁。当前只有 kimicode 的 store 是它的薄壳（仅差 platform / cli 常量与扫描函数）；
+//! 骨架按平台泛化保留，后续回归的平台 parser 直接复用。
 //! 写表方式：多平台共用表按 platform 隔离（log_file 按 platform+path 联合唯一，
 //! usage_daily 只删重建本 platform+cli 行组，不动其他平台数据）。
 //! 表结构由 crates/core/migrations/ 定义，经 crate::db 按版本号迁移执行（schema 统一收归 Rust 侧）。
@@ -15,7 +16,7 @@ use thiserror::Error;
 use super::scanner::{FileCursor, ScanOutput};
 use crate::models::{Platform, ScanReport};
 
-/// 公共骨架的错误类型；各平台 store 薄壳经 From 转换为本模块错误（KimiError / OmpError）
+/// 公共骨架的错误类型；平台 store 薄壳经 From 转换为本模块错误（KimiError）
 #[derive(Debug, Error)]
 pub enum LogError {
     #[error("日志目录不可读: {0}")]

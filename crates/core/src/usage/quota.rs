@@ -1,17 +1,15 @@
 //! 配额/余额刷新编排（quota_refresh 命令的业务层）：
-//! 查 platform_account → keystore 取凭据 → 调对应平台适配器 → 写 quota_snapshot 表。
-//! 单平台失败返回 CommandError（不 panic）；Kimi 的 coding usages 为非官方 best-effort 接口，
+//! 查 platform_account → keystore 取凭据 → 调 Kimi 平台适配器 → 写 quota_snapshot 表。
+//! 失败返回 CommandError（不 panic）；Kimi 的 coding usages 为非官方 best-effort 接口，
 //! 失败只记入 detail_json，不拖垮官方余额主数据源。
 
 use sqlx::sqlite::SqlitePool;
 
 use super::account::{self, AccountRow};
-use crate::adapters::deepseek::DeepSeekAdapter;
 use crate::adapters::kimi::{KimiAdapter, DEFAULT_CODING_API_BASE};
-use crate::adapters::mimo::MimoAdapter;
-use crate::adapters::{AdapterError, UsageAdapter};
+use crate::adapters::AdapterError;
 use crate::keystore::SecretStore;
-use crate::models::{CommandError, Credential, Platform, QuotaSnapshot};
+use crate::models::{CommandError, Platform, QuotaSnapshot};
 
 /// 刷新指定平台配额/余额并写快照，返回写入的快照。
 /// Kimi 一次 refresh 只写一条快照（两个数据源的取舍见 merge_kimi_snapshot 注释）。
@@ -31,21 +29,9 @@ async fn refresh_with(
     coding_base_override: Option<&str>,
 ) -> Result<QuotaSnapshot, CommandError> {
     let snapshot = match platform {
-        // MiMo 纯本地推算（读 platform_account + usage_event.cost），不需要凭据
-        Platform::Mimo => MimoAdapter::snapshot(pool).await?,
         Platform::Kimi => {
             let (account, key) = require_account(pool, secrets, platform).await?;
             refresh_kimi(&account, &key, coding_base_override).await?
-        }
-        Platform::Deepseek => {
-            let (account, key) = require_account(pool, secrets, platform).await?;
-            refresh_deepseek(&account, &key).await?
-        }
-        // omp 只有本地日志，无配额/余额数据源
-        Platform::Omp => {
-            return Err(CommandError::unavailable(
-                "omp 平台无配额/余额数据源（仅本地日志统计）",
-            ))
         }
     };
     account::save_quota_snapshot(pool, &snapshot).await?;
@@ -153,20 +139,6 @@ fn merge_kimi_snapshot(
     }
 }
 
-/// DeepSeek 余额刷新（官方 /user/balance）
-async fn refresh_deepseek(account: &AccountRow, key: &str) -> Result<QuotaSnapshot, CommandError> {
-    let api_base = account
-        .api_base
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(crate::adapters::deepseek::DEFAULT_API_BASE);
-    let snapshot = DeepSeekAdapter::new()
-        .fetch(api_base, &Credential::ApiKey(key.to_string()))
-        .await?;
-    Ok(snapshot)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,7 +195,7 @@ mod tests {
         .await
         .unwrap();
         secrets
-            .set(default_credential_ref(Platform::Kimi).unwrap(), "sk-test")
+            .set(default_credential_ref(Platform::Kimi), "sk-test")
             .unwrap();
     }
 
@@ -350,89 +322,16 @@ mod tests {
         disabled.enabled = false;
         set_row(&pool, Platform::Kimi, &disabled).await.unwrap();
         secrets
-            .set(default_credential_ref(Platform::Kimi).unwrap(), "sk-test")
+            .set(default_credential_ref(Platform::Kimi), "sk-test")
             .unwrap();
         let err = refresh(&pool, &secrets, Platform::Kimi).await.unwrap_err();
         assert_eq!(err.kind, "unavailable");
     }
 
-    #[tokio::test]
-    async fn deepseek_refresh_success_and_error_path() {
-        let (_tmp, pool) = temp_pool().await;
-        let secrets = MemoryStore::default();
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/user/balance"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "is_available": true,
-                "balance_infos": [{"currency": "CNY", "total_balance": "110.00"}]
-            })))
-            .mount(&server)
-            .await;
-        set_row(
-            &pool,
-            Platform::Deepseek,
-            &input(Platform::Deepseek, Some(server.uri())),
-        )
-        .await
-        .unwrap();
-        secrets
-            .set(default_credential_ref(Platform::Deepseek).unwrap(), "sk-ds")
-            .unwrap();
-
-        let snap = refresh(&pool, &secrets, Platform::Deepseek).await.unwrap();
-        assert_eq!(snap.remaining, Some(110.0));
-        assert_eq!(snapshot_count(&pool, "deepseek").await, 1);
-
-        // 401 → unauthorized，不再追加快照
-        server.reset().await;
-        Mock::given(method("GET"))
-            .respond_with(ResponseTemplate::new(401))
-            .mount(&server)
-            .await;
-        let err = refresh(&pool, &secrets, Platform::Deepseek)
-            .await
-            .unwrap_err();
-        assert_eq!(err.kind, "unauthorized");
-        assert_eq!(snapshot_count(&pool, "deepseek").await, 1);
-    }
-
-    #[tokio::test]
-    async fn mimo_refresh_is_local_estimation() {
-        let (_tmp, pool) = temp_pool().await;
-        let secrets = MemoryStore::default();
-        let mut input = input(Platform::Mimo, None);
-        input.quota_total = Some(100.0);
-        input.quota_cycle = Some("monthly".to_string());
-        set_row(&pool, Platform::Mimo, &input).await.unwrap();
-
-        // 无网络、无凭据：本地推算成功落快照
-        let snap = refresh(&pool, &secrets, Platform::Mimo).await.unwrap();
-        assert_eq!(snap.total, Some(100.0));
-        assert_eq!(snap.used, Some(0.0));
-        assert_eq!(snapshot_count(&pool, "mimo").await, 1);
-
-        // 未手录总额 → unavailable
-        sqlx::query("UPDATE platform_account SET quota_total = NULL WHERE platform = 'mimo'")
-            .execute(&pool)
-            .await
-            .unwrap();
-        let err = refresh(&pool, &secrets, Platform::Mimo).await.unwrap_err();
-        assert_eq!(err.kind, "unavailable");
-    }
-
-    #[tokio::test]
-    async fn omp_has_no_quota_source() {
-        let (_tmp, pool) = temp_pool().await;
-        let secrets = MemoryStore::default();
-        let err = refresh(&pool, &secrets, Platform::Omp).await.unwrap_err();
-        assert_eq!(err.kind, "unavailable");
-    }
-
     // ---- detail_json 前后端契约锁 ----
-    // 前端 apps/desktop/src/stores/usage.ts 的 parseKimi/Mimo/DeepseekQuotaDetail 按固定
+    // 前端 apps/desktop/src/stores/usage.ts 的 parseKimiQuotaDetail 按固定
     // 键名解析 detail_json；Rust 改键名不会报错，前端只会静默降级（字段解析为 null）。
-    // 以下测试锁死三个平台 detail_json 的键集合与值类型，改形状必须先改前端。
+    // 以下测试锁死 detail_json 的键集合与值类型，改形状必须先改前端。
 
     /// 断言 JSON 对象的键集合与期望完全一致（多键/少键/改键名都失败）
     fn assert_json_keys(value: &serde_json::Value, mut expected: Vec<&str>) {
@@ -539,72 +438,5 @@ mod tests {
         );
         assert!(sources["coding_usages"].is_null());
         assert!(sources["coding_usages_error"].is_string());
-    }
-
-    #[tokio::test]
-    async fn mimo_detail_json_contract_locked() {
-        let (_tmp, pool) = temp_pool().await;
-        let secrets = MemoryStore::default();
-        let mut input = input(Platform::Mimo, None);
-        input.quota_total = Some(100.0);
-        input.quota_cycle = Some("monthly".to_string());
-        set_row(&pool, Platform::Mimo, &input).await.unwrap();
-
-        let snap = refresh(&pool, &secrets, Platform::Mimo).await.unwrap();
-        let detail: serde_json::Value =
-            serde_json::from_str(snap.detail_json.as_deref().unwrap()).unwrap();
-        assert_json_keys(
-            &detail,
-            vec!["quota_cycle", "period_start", "progress", "unit"],
-        );
-        assert_eq!(detail["quota_cycle"], "monthly");
-        assert!(detail["period_start"].is_string());
-        assert!(detail["progress"].is_number());
-        assert_eq!(detail["unit"], "credit");
-    }
-
-    #[tokio::test]
-    async fn deepseek_detail_json_contract_locked() {
-        let (_tmp, pool) = temp_pool().await;
-        let secrets = MemoryStore::default();
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/user/balance"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "is_available": true,
-                "balance_infos": [{
-                    "currency": "CNY",
-                    "total_balance": "110.00",
-                    "granted_balance": "10.00",
-                    "topped_up_balance": "100.00"
-                }]
-            })))
-            .mount(&server)
-            .await;
-        set_row(
-            &pool,
-            Platform::Deepseek,
-            &input(Platform::Deepseek, Some(server.uri())),
-        )
-        .await
-        .unwrap();
-        secrets
-            .set(default_credential_ref(Platform::Deepseek).unwrap(), "sk-ds")
-            .unwrap();
-
-        let snap = refresh(&pool, &secrets, Platform::Deepseek).await.unwrap();
-        let detail: serde_json::Value =
-            serde_json::from_str(snap.detail_json.as_deref().unwrap()).unwrap();
-        assert_json_keys(&detail, vec!["is_available", "balances"]);
-        assert!(detail["is_available"].is_boolean());
-        // balances 为币种分项数组，元素键名固定（granted/topped_up 可空）
-        let items = detail["balances"].as_array().expect("balances 应为数组");
-        assert!(!items.is_empty());
-        let item = &items[0];
-        assert_json_keys(item, vec!["currency", "total", "granted", "topped_up"]);
-        assert!(item["currency"].is_string());
-        assert!(item["total"].is_number());
-        assert!(item["granted"].is_number());
-        assert!(item["topped_up"].is_number());
     }
 }

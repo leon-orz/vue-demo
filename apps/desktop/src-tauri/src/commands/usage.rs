@@ -1,4 +1,6 @@
-//! AI 用量统计命令（M1 多平台泛化 S1-4）：薄壳，业务逻辑在 toogl_core::usage。
+//! AI 用量统计命令（M1）：薄壳，业务逻辑在 toogl_core::usage。
+//! 2026-10-02 决策：当前只统计 Kimi Code，platform 参数自然只剩 kimi 可用
+//! （其他平台待回归时从 git 历史恢复）；命令集合与签名不动。
 //! 前端对应封装见 apps/desktop/src/api/usage.ts。
 //! 所有命令统一返回 Result<T, CommandError>，前端 invoke 抛出的即 CommandError JSON。
 
@@ -45,7 +47,7 @@ fn keyring() -> KeyringStore {
 }
 
 /// 手动触发增量扫描（启动时与定时任务复用同一逻辑；各 store 内互斥锁防并发双计）。
-/// platform 不传 = 全平台（kimi/mimo/omp；deepseek 无本地日志）；
+/// platform 不传 = 全部有日志的平台（当前只有 kimi）；
 /// 单平台失败不影响其他平台，各自结果/错误体现在返回值的每个元素里。
 /// sessions_dir 为 Kimi 日志目录覆盖（M6 设置项），只作用于 kimi 平台。
 #[tauri::command]
@@ -98,7 +100,7 @@ pub async fn usage_series(
     state.require()?.usage_series(platform, range).await
 }
 
-/// 拉取/重算平台配额并写快照（MiMo 为本地推算；编排在 usage::quota）
+/// 拉取/重算平台配额并写快照（编排在 usage::quota）
 #[tauri::command]
 pub async fn quota_refresh(
     state: State<'_, UsageState>,

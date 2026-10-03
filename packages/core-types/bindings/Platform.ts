@@ -2,5 +2,6 @@
 
 /**
  * 用量来源平台。序列化为小写字符串，与数据表 platform 列取值一致。
+ * 当前只有 Kimi；枚举保留以便后续平台回归（omp/dsh/MiMo 从 git 历史恢复）。
  */
-export type Platform = "kimi" | "mimo" | "omp" | "deepseek";
+export type Platform = "kimi";

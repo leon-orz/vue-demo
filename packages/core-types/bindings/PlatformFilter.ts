@@ -4,4 +4,4 @@
  * 用量查询命令的平台过滤：具体平台或 all（跨平台合计，不过滤 platform 列）。
  * 序列化为小写字符串（与《02-开发计划》M1 命令表 platform='all' 的约定一致）。
  */
-export type PlatformFilter = "all" | "kimi" | "mimo" | "omp" | "deepseek";
+export type PlatformFilter = "all" | "kimi";

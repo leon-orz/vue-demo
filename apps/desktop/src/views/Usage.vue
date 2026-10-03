@@ -12,18 +12,11 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Separator } from '@/components/ui/separator'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { formatDateTime, formatTokens, inputTotal } from '@/lib/format'
-import { PLATFORM_LABELS, USAGE_PLATFORMS, useUsageStore, type TrendRange } from '@/stores/usage'
+import { PLATFORM_LABELS, useUsageStore, type TrendRange } from '@/stores/usage'
 import { useSettingsStore } from '@/stores/settings'
-import type { PlatformFilter } from '@toogl/core-types'
 
 const usage = useUsageStore()
 const settings = useSettingsStore()
-
-/** 平台切换 Tab：总览（all = 跨平台合计）+ 四个平台 */
-const platformTabs: { value: PlatformFilter; label: string }[] = [
-  { value: 'all', label: '总览' },
-  ...USAGE_PLATFORMS.map((p) => ({ value: p as PlatformFilter, label: PLATFORM_LABELS[p] })),
-]
 
 const trendTabs: { value: TrendRange; label: string }[] = [
   { value: 'Day', label: '天' },
@@ -73,19 +66,7 @@ onMounted(() => usage.init(settings.kimiSessionsDir || undefined))
       @retry="usage.retry(settings.kimiSessionsDir || undefined)"
     />
 
-    <!-- 平台切换 Tab：控制下方概览 / 趋势 / 分布的过滤维度 -->
-    <Tabs
-      :model-value="usage.activeFilter"
-      @update:model-value="usage.setActiveFilter($event as PlatformFilter)"
-    >
-      <TabsList>
-        <TabsTrigger v-for="tab in platformTabs" :key="tab.value" :value="tab.value">
-          {{ tab.label }}
-        </TabsTrigger>
-      </TabsList>
-    </Tabs>
-
-    <!-- 当前选中过滤的概览卡片 -->
+    <!-- 概览卡片（Kimi Code 单平台，2026-10-02 决策后其他平台已砍） -->
     <section class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
       <Card>
         <CardHeader class="pb-2">
@@ -145,33 +126,6 @@ onMounted(() => usage.init(settings.kimiSessionsDir || undefined))
       </Card>
     </section>
 
-    <!-- 总览 Tab：各平台今日用量卡片墙 -->
-    <section
-      v-if="usage.activeFilter === 'all'"
-      class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4"
-    >
-      <Card v-for="platform in USAGE_PLATFORMS" :key="platform">
-        <CardHeader class="pb-2">
-          <CardTitle class="text-sm font-medium text-muted-foreground">
-            {{ PLATFORM_LABELS[platform] }} 今日用量
-          </CardTitle>
-        </CardHeader>
-        <CardContent class="flex flex-col gap-2">
-          <div class="flex items-baseline justify-between">
-            <span class="text-sm text-muted-foreground">输入（含缓存）</span>
-            <span class="text-xl font-bold">
-              {{
-                usage.todayByFilter[platform]
-                  ? formatTokens(inputTotal(usage.todayByFilter[platform]!.totals))
-                  : '—'
-              }}
-            </span>
-          </div>
-          <CacheHitBadge :rate="usage.todayByFilter[platform]?.totals.cache_hit_rate ?? null" />
-        </CardContent>
-      </Card>
-    </section>
-
     <!-- 趋势图 -->
     <Card>
       <CardHeader class="flex-row items-center justify-between space-y-0">
@@ -215,19 +169,16 @@ onMounted(() => usage.init(settings.kimiSessionsDir || undefined))
 
     <Separator />
 
-    <!-- 配额/余额：总览 Tab 显示全部平台卡片墙，单平台 Tab 只显示该平台 -->
+    <!-- Kimi 配额/余额 -->
     <section class="grid grid-cols-1 gap-4 lg:grid-cols-2">
-      <template v-for="platform in USAGE_PLATFORMS" :key="platform">
-        <QuotaCard
-          v-if="usage.activeFilter === 'all' || usage.activeFilter === platform"
-          :platform="platform"
-          :snapshot="usage.quotas[platform]"
-          :account="usage.accounts[platform]"
-          :loading="usage.quotaLoading[platform] ?? false"
-          :error="usage.quotaErrors[platform] ?? null"
-          @refresh="usage.refreshQuota(platform)"
-        />
-      </template>
+      <QuotaCard
+        platform="kimi"
+        :snapshot="usage.quotas.kimi"
+        :account="usage.accounts.kimi"
+        :loading="usage.quotaLoading.kimi ?? false"
+        :error="usage.quotaErrors.kimi ?? null"
+        @refresh="usage.refreshQuota('kimi')"
+      />
     </section>
   </div>
 </template>

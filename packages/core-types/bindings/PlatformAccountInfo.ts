@@ -3,8 +3,7 @@ import type { Platform } from "./Platform";
 
 /**
  * 平台账户配置视图（platform_account_get 返回值，对应 platform_account 表）。
- * 凭据本体只进 keyring，此处仅有引用与是否存在标记；
- * MiMo 用 quota_total/quota_cycle 手录套餐月度总额与计费周期。
+ * 凭据本体只进 keyring，此处仅有引用与是否存在标记。
  */
 export type PlatformAccountInfo = { id: number, platform: Platform, name: string, api_base: string | null, 
 /**
@@ -16,6 +15,6 @@ credential_ref: string | null,
  */
 has_credential: boolean, quota_total: number | null, 
 /**
- * 计费周期（如 "monthly"），MiMo 套餐用
+ * 计费周期（如 "monthly"）
  */
 quota_cycle: string | null, enabled: boolean, };

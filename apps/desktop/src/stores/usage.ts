@@ -19,17 +19,14 @@ import type {
 /** 趋势图可选范围（Last5Hours 不参与趋势切换） */
 export type TrendRange = Exclude<UsageRange, 'Last5Hours'>
 
-/** 有本地日志的平台（平台 Tab / 总览卡片墙顺序） */
-export const USAGE_PLATFORMS: readonly Platform[] = ['kimi', 'mimo', 'omp', 'deepseek']
+/** 有本地日志的平台（2026-10-02 决策：当前只有 kimi；其他平台待回归时从 git 历史恢复） */
+export const USAGE_PLATFORMS: readonly Platform[] = ['kimi']
 
-/** 有配额/余额数据源的平台；omp 仅本地日志统计，无配额卡 */
-export const QUOTA_PLATFORMS: readonly Platform[] = ['kimi', 'mimo', 'deepseek']
+/** 有配额/余额数据源的平台 */
+export const QUOTA_PLATFORMS: readonly Platform[] = ['kimi']
 
 export const PLATFORM_LABELS: Record<Platform, string> = {
   kimi: 'Kimi',
-  mimo: 'MiMo',
-  omp: 'omp',
-  deepseek: 'DeepSeek',
 }
 
 // ---- 配额快照 detail_json 解析（纯函数；解析失败返回 null，不阻塞页面）----
@@ -82,96 +79,18 @@ export function parseKimiQuotaDetail(
   }
 }
 
-/** MiMo detail_json：本地日志推算的套餐消耗进度（unit 恒为 credit；progress 超量时 > 1，后端不截断） */
-export interface MimoQuotaDetail {
-  quotaCycle: string | null
-  periodStart: string | null
-  progress: number | null
-  unit: string | null
-}
-
-/**
- * 解析 MiMo 手录套餐总额输入：空串 = 不配置套餐（null）；
- * 非有限正数返回 undefined 表示非法输入，调用方必须拒绝保存——
- * NaN 经 JSON 序列化会变 null，静默清掉已录总额，必须在入库前拦下。
- */
-export function parseQuotaTotalInput(raw: string): number | null | undefined {
-  const trimmed = raw.trim()
-  if (trimmed === '') return null
-  const parsed = Number(trimmed)
-  if (!Number.isFinite(parsed) || parsed <= 0) return undefined
-  return parsed
-}
-
-export function parseMimoQuotaDetail(
-  snapshot: QuotaSnapshot | null | undefined,
-): MimoQuotaDetail | null {
-  const raw = snapshot?.detail_json
-  if (!raw) return null
-  try {
-    const parsed = JSON.parse(raw) as {
-      quota_cycle?: string
-      period_start?: string
-      progress?: number
-      unit?: string
-    }
-    return {
-      quotaCycle: parsed.quota_cycle ?? null,
-      periodStart: parsed.period_start ?? null,
-      progress: parsed.progress ?? null,
-      unit: parsed.unit ?? null,
-    }
-  } catch {
-    return null
-  }
-}
-
-/** DeepSeek detail_json：按量余额的币种分项 */
-export interface DeepseekBalanceItem {
-  currency?: string
-  total?: number
-  granted?: number
-  topped_up?: number
-}
-
-export interface DeepseekQuotaDetail {
-  isAvailable: boolean | null
-  balances: DeepseekBalanceItem[]
-}
-
-export function parseDeepseekQuotaDetail(
-  snapshot: QuotaSnapshot | null | undefined,
-): DeepseekQuotaDetail | null {
-  const raw = snapshot?.detail_json
-  if (!raw) return null
-  try {
-    const parsed = JSON.parse(raw) as {
-      is_available?: boolean
-      balances?: DeepseekBalanceItem[]
-    }
-    return {
-      isAvailable: parsed.is_available ?? null,
-      balances: parsed.balances ?? [],
-    }
-  } catch {
-    return null
-  }
-}
-
-/** M1 多平台用量 store：聚合数据按当前选中平台过滤，配额/账户按平台组织 */
+/** M1 用量 store（当前只统计 Kimi Code）：聚合数据按当前平台过滤加载，配额/账户按平台组织 */
 export const useUsageStore = defineStore('usage', () => {
-  /** 平台 Tab 当前选中项（all = 总览/跨平台合计） */
-  const activeFilter = ref<PlatformFilter>('all')
-  /** 总览卡片墙：各平台 + 合计的今日摘要 */
-  const todayByFilter = ref<Partial<Record<PlatformFilter, UsageSummary>>>({})
-  /** 当前选中过滤的各范围汇总（Day / Week / Month / Last5Hours），读取不阻塞 */
+  /** 当前平台过滤（all = 跨平台合计；平台 Tab 已随多平台砍掉，保留过滤维度供回归） */
+  const activeFilter = ref<PlatformFilter>('kimi')
+  /** 当前过滤的各范围汇总（Day / Week / Month / Last5Hours），读取不阻塞 */
   const summaries = ref<Partial<Record<UsageRange, UsageSummary>>>({})
   const trendRange = ref<TrendRange>('Day')
   const series = ref<UsageSeries | null>(null)
   const byProject = ref<UsageGroup[]>([])
   const byModel = ref<UsageGroup[]>([])
 
-  /** 配额快照按平台缓存（quota_latest 只读本地，quota_refresh 才走网络/推算） */
+  /** 配额快照按平台缓存（quota_latest 只读本地，quota_refresh 才走网络） */
   const quotas = ref<Partial<Record<Platform, QuotaSnapshot | null>>>({})
   /** 配额刷新失败原因（按平台）；unauthorized 时 UI 引导去设置页 */
   const quotaErrors = ref<Partial<Record<Platform, CommandError | null>>>({})
@@ -182,14 +101,14 @@ export const useUsageStore = defineStore('usage', () => {
 
   const scanning = ref(false)
   const lastScanAt = ref<string | null>(null)
-  /** 最近一次全平台扫描的分平台报告（单平台失败不影响其他平台） */
+  /** 最近一次扫描的分平台报告（单平台失败不影响其他平台） */
   const lastScanReports = ref<PlatformScanReport[]>([])
   const initialized = ref(false)
   /** 初始化/聚合加载失败原因；非空时页面显示错误横幅，可重试 */
   const loadError = ref<CommandError | null>(null)
   /**
    * 聚合数据（series / byProject / byModel）写请求序号：loadAggregates 与 setTrendRange 共用。
-   * 每个发起点 bump、落地前校验，快速切 Tab / 切范围时慢的旧响应直接丢弃，不覆盖新数据。
+   * 每个发起点 bump、落地前校验，快速切过滤 / 切范围时慢的旧响应直接丢弃，不覆盖新数据。
    */
   let aggregatesRequestId = 0
 
@@ -198,8 +117,6 @@ export const useUsageStore = defineStore('usage', () => {
   const monthSummary = computed(() => summaries.value.Month ?? null)
 
   const kimiQuotaDetail = computed(() => parseKimiQuotaDetail(quotas.value.kimi))
-  const mimoQuotaDetail = computed(() => parseMimoQuotaDetail(quotas.value.mimo))
-  const deepseekQuotaDetail = computed(() => parseDeepseekQuotaDetail(quotas.value.deepseek))
 
   /** 本次扫描新增事件合计 / 失败平台列表（页面状态行展示用） */
   const lastScanEventsAdded = computed(() =>
@@ -207,22 +124,7 @@ export const useUsageStore = defineStore('usage', () => {
   )
   const lastScanFailures = computed(() => lastScanReports.value.filter((r) => r.error !== null))
 
-  /** 总览卡片墙：拉取 all + 各平台的今日摘要；失败写入 loadError（同源 DB，失败一般是系统性的） */
-  async function loadOverview() {
-    const filters: PlatformFilter[] = ['all', ...USAGE_PLATFORMS]
-    try {
-      const results = await Promise.all(filters.map((f) => api.usageSummary(f, 'Day')))
-      const next: Partial<Record<PlatformFilter, UsageSummary>> = {}
-      filters.forEach((f, i) => {
-        next[f] = results[i]
-      })
-      todayByFilter.value = next
-    } catch (err) {
-      loadError.value = toCommandError(err)
-    }
-  }
-
-  /** 拉取当前选中过滤的聚合数据（汇总 + 当前趋势范围的分组与序列），失败写入 loadError；过期响应丢弃 */
+  /** 拉取当前过滤的聚合数据（汇总 + 当前趋势范围的分组与序列），失败写入 loadError；过期响应丢弃 */
   async function loadAggregates() {
     const filter = activeFilter.value
     const range = trendRange.value
@@ -246,7 +148,7 @@ export const useUsageStore = defineStore('usage', () => {
     }
   }
 
-  /** 切换平台 Tab：清空旧过滤的展示数据后按新过滤重取 */
+  /** 切换平台过滤：清空旧过滤的展示数据后按新过滤重取 */
   async function setActiveFilter(filter: PlatformFilter) {
     if (filter === activeFilter.value) return
     activeFilter.value = filter
@@ -277,7 +179,7 @@ export const useUsageStore = defineStore('usage', () => {
     }
   }
 
-  /** 全平台增量扫描（sessionsDir 仅覆盖 kimi 日志目录），完成后刷新聚合与总览 */
+  /** 全平台增量扫描（sessionsDir 仅覆盖 kimi 日志目录），完成后刷新聚合 */
   async function scan(sessionsDir?: string) {
     if (scanning.value) return
     scanning.value = true
@@ -285,11 +187,7 @@ export const useUsageStore = defineStore('usage', () => {
       const reports = await api.scanUsageLogs(undefined, sessionsDir)
       lastScanReports.value = reports
       lastScanAt.value = new Date().toISOString()
-      await Promise.all([loadOverview(), loadAggregates()])
-      // MiMo 配额是纯本地日志推算：扫描后顺手重算，进度条保持新鲜（未配置套餐则跳过，不报错）
-      if (accounts.value.mimo?.quota_total != null) {
-        await refreshQuota('mimo')
-      }
+      await loadAggregates()
     } catch (err) {
       // 命令级失败（无分平台报告）：合成全平台失败报告，错误统一经 lastScanFailures 展示
       const message = toCommandError(err).message
@@ -317,7 +215,7 @@ export const useUsageStore = defineStore('usage', () => {
     )
   }
 
-  /** 手动刷新某平台配额（Kimi/DeepSeek 走网络，MiMo 本地推算），失败进该平台的 quotaErrors */
+  /** 手动刷新某平台配额（Kimi 走网络），失败进该平台的 quotaErrors */
   async function refreshQuota(platform: Platform) {
     quotaLoading.value[platform] = true
     try {
@@ -358,22 +256,21 @@ export const useUsageStore = defineStore('usage', () => {
   async function init(sessionsDir?: string) {
     if (initialized.value) return
     loadError.value = null
-    await Promise.all([loadAccounts(), loadLatestQuotas(), loadOverview(), loadAggregates()])
+    await Promise.all([loadAccounts(), loadLatestQuotas(), loadAggregates()])
     if (loadError.value) return
     initialized.value = true
     void scan(sessionsDir)
   }
 
-  /** 错误横幅的重试入口：先清空错误，未初始化走 init，已初始化只重取聚合与总览 */
+  /** 错误横幅的重试入口：先清空错误，未初始化走 init，已初始化只重取聚合 */
   async function retry(sessionsDir?: string) {
     loadError.value = null
-    if (initialized.value) await Promise.all([loadOverview(), loadAggregates()])
+    if (initialized.value) await loadAggregates()
     else await init(sessionsDir)
   }
 
   return {
     activeFilter,
-    todayByFilter,
     summaries,
     trendRange,
     series,
@@ -394,9 +291,6 @@ export const useUsageStore = defineStore('usage', () => {
     last5Summary,
     monthSummary,
     kimiQuotaDetail,
-    mimoQuotaDetail,
-    deepseekQuotaDetail,
-    loadOverview,
     loadAggregates,
     setActiveFilter,
     setTrendRange,

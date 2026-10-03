@@ -42,6 +42,11 @@ pub const MIGRATIONS: &[Migration] = &[
         description: "create_proxy_setting",
         sql: include_str!("../migrations/0005_proxy_setting.sql"),
     },
+    Migration {
+        version: 6,
+        description: "kimi_only_cleanup",
+        sql: include_str!("../migrations/0006_kimi_only.sql"),
+    },
 ];
 
 /// 按版本号执行未应用过的迁移，并登记到 _toogl_migrations 表。
@@ -291,6 +296,81 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(event_count, 0);
+    }
+
+    /// 0006 清理：五张表的非 kimi 存量数据全部删除，kimi 行保留；重复迁移幂等
+    #[tokio::test]
+    async fn migration_0006_deletes_non_kimi_data() {
+        let (_tmp, pool) = temp_pool().await;
+        migrate(&pool).await.unwrap();
+
+        // 造数：kimi 与 mimo/omp/deepseek 各一份
+        sqlx::query(
+            "INSERT INTO log_file (platform, path, offset, size, mtime, last_scanned_at)
+             VALUES ('kimi', 'k.log', 0, 0, 0, '2026-01-01T00:00:00Z'),
+                    ('omp', 'o.log', 0, 0, 0, '2026-01-01T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO usage_event
+                 (platform, cli, log_file_id, ts, session_id, project, model,
+                  input_other, output, cache_read, cache_creation, cost)
+             SELECT platform, 'cli', id, 1000, 's1', 'app', 'm1', 1, 1, 0, 0, NULL FROM log_file",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO usage_daily
+                 (date, platform, cli, project, model, input_other, output, cache_read, cache_creation)
+             VALUES ('2026-01-01', 'kimi', 'kimi-code', 'app', 'm1', 1, 1, 0, 0),
+                    ('2026-01-01', 'mimo', 'mimocode', 'app', 'm1', 1, 1, 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO quota_snapshot (platform, remaining, fetched_at)
+             VALUES ('kimi', 1.0, '2026-01-01T00:00:00Z'),
+                    ('deepseek', 2.0, '2026-01-01T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO platform_account (platform, name, enabled)
+             VALUES ('kimi', '主账号', 1), ('deepseek', 'DS', 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // 删除已登记的 0006 记录并手动重放（migrate 已跑过一轮，重放验证幂等）
+        sqlx::query("DELETE FROM _toogl_migrations WHERE version = 6")
+            .execute(&pool)
+            .await
+            .unwrap();
+        migrate(&pool).await.unwrap();
+        // 再来一遍：已登记跳过 + 语句级幂等，数据不变
+        apply_sql(&pool, MIGRATIONS[5].sql).await;
+
+        for table in [
+            "log_file",
+            "usage_event",
+            "usage_daily",
+            "quota_snapshot",
+            "platform_account",
+        ] {
+            let (total, kimi): (i64, i64) = sqlx::query_as(&format!(
+                "SELECT COUNT(*), COALESCE(SUM(platform = 'kimi'), 0) FROM {table}"
+            ))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!((total, kimi), (1, 1), "表 {table} 应只剩 kimi 一行");
+        }
     }
 
     /// 0004 收尾：kimi_account 配置迁入 platform_account（credential_ref 保留，
