@@ -12,7 +12,7 @@ Toogl（图格）是一个**个人自用的 Windows 桌面工具箱**：Tauri 2 
 - **M1 AI 用量统计（多平台聚合）**：解析 kimi-code `~/.kimi-code/sessions/**/wire.jsonl`、MiMo Code `~/.local/share/mimocode/mimocode.db`（SQLite 只读）、oh-my-pi（omp）`~/.omp/agent/sessions/**/*.jsonl` 三类本地 CLI 日志，统一聚合 token 用量 / 缓存命中率 / 趋势 / 分布；配额余额分平台适配（Kimi 非官方 usages 接口 best-effort、DeepSeek 官方 `/user/balance`、MiMo 手录总额 + 本地推算）。只读聚合，不转发流量。不支持 Codex CLI 日志；GLM 套餐不列入；dsh 为阶段三预留。
 - **M2 我的 API 平台（已取消）**：不再自建 new-api 网关，需求并入 M1，编号保留不复用。取消原因：官方套餐直连已够用、MiMo 条款禁止套餐额度用于非编程场景、免去网关运维负担。
 - **M3 服务器 / M4 NAS**：一体机的监控、容器管理、WoL 远程开机、磁盘健康（阶段二起）。
-- **M5 魔法工具**：内嵌 mihomo sidecar（RESTful API 默认 9090），做节点切换、系统代理开关、规则分流。
+- **M5 魔法工具**：内嵌 mihomo sidecar（RESTful API 默认 9090），做节点切换、系统代理开关、规则分流。节点导入以订阅链接为主（用户当前为商家包月订阅）、手动粘贴为辅（后续 VPS 自建）；游戏场景已确认入需求，TUN 模式 + 游戏分流（M5-09）为阶段三确认项。
 - **M6 设置 + Dashboard**。
 
 分阶段开发：阶段一（不依赖新硬件，桌面端直连模式）→ 阶段二（一体机到位，部署 hub 中枢服务 M3/M4，不再部署 new-api）→ 阶段三（按需增强）。代码中的 `TODO(S1-2)` 等标记对应各阶段任务号。
