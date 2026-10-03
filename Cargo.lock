@@ -4274,6 +4274,8 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "ts-rs",
+ "windows-sys 0.59.0",
+ "winreg",
  "wiremock",
 ]
 

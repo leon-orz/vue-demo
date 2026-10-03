@@ -11,4 +11,5 @@ pub mod mihomo;
 pub mod mimocode;
 pub mod models;
 pub mod omp;
+pub mod sysproxy;
 pub mod usage;
