@@ -295,6 +295,32 @@ fn ensure_config(work_dir: &Path, controller_port: u16) -> std::io::Result<(Path
     Ok((path, true))
 }
 
+/// 解析系统代理开关指向的本地 mixed 端口：读 sidecar 生成的 config.yaml 的
+/// `mixed-port` 字段（用户可手改），读不到/解析失败回退常量 [`MIXED_PORT`]。
+/// 注意阶段一约定：系统代理走 mihomo 的 mixed 入口，而不是 external-controller 端口。
+pub fn resolve_mixed_port(app_data_dir: &Path) -> u16 {
+    let path = app_data_dir.join("mihomo").join("config.yaml");
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|content| parse_mixed_port(&content))
+        .unwrap_or(MIXED_PORT)
+}
+
+/// 纯解析：取顶层 `mixed-port: <n>` 行的端口号（忽略注释与缩进变体），便于单测。
+/// 极简行解析而非引入 YAML 解析器：初始模板固定顶层一行，足够覆盖手改场景。
+fn parse_mixed_port(config: &str) -> Option<u16> {
+    for line in config.lines() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("mixed-port:") {
+            return value.trim().parse().ok();
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,6 +381,36 @@ mod tests {
         assert!(created);
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("external-controller: 127.0.0.1:9091"));
+    }
+
+    // ---- mixed-port 解析（系统代理开关指向的本地入口） ----
+
+    #[test]
+    fn parse_mixed_port_from_template_and_edited() {
+        // 初始模板固定 7890
+        assert_eq!(parse_mixed_port(&render_initial_config(9090)), Some(7890));
+        // 用户手改为其他端口
+        assert_eq!(
+            parse_mixed_port("mixed-port: 7899\nexternal-controller: 127.0.0.1:9090\n"),
+            Some(7899)
+        );
+        // 注释行与缺失字段
+        assert_eq!(parse_mixed_port("# mixed-port: 1234\n"), None);
+        assert_eq!(parse_mixed_port("mode: rule\n"), None);
+        // 非法端口号
+        assert_eq!(parse_mixed_port("mixed-port: abc\n"), None);
+    }
+
+    #[test]
+    fn resolve_mixed_port_reads_config_and_falls_back() {
+        // 无配置文件 → 常量兜底
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(resolve_mixed_port(tmp.path()), MIXED_PORT);
+        // 有配置文件且手改过端口 → 以文件为准
+        let mihomo_dir = tmp.path().join("mihomo");
+        std::fs::create_dir_all(&mihomo_dir).unwrap();
+        std::fs::write(mihomo_dir.join("config.yaml"), "mixed-port: 7901\n").unwrap();
+        assert_eq!(resolve_mixed_port(tmp.path()), 7901);
     }
 
     #[test]

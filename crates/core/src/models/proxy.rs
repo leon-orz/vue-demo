@@ -5,6 +5,8 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use super::sysproxy::SystemProxyStatus;
+
 /// 节点延迟状态（mihomo 惯例：history 末条 delay=0 视为超时，空 history 为未测）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
@@ -101,6 +103,62 @@ pub enum RuleMode {
     Direct,
 }
 
+impl RuleMode {
+    /// mihomo /configs 与 proxy_setting 持久化使用的小写字符串
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Rule => "rule",
+            Self::Global => "global",
+            Self::Direct => "direct",
+        }
+    }
+
+    /// 解析小写模式串（mihomo /configs 响应与 proxy_setting 读取共用）
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "rule" => Some(Self::Rule),
+            "global" => Some(Self::Global),
+            "direct" => Some(Self::Direct),
+            _ => None,
+        }
+    }
+}
+
+/// 记住的节点选择（持久化到 proxy_setting，供 UI 初始展示；mihomo 侧才是事实源）
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../packages/core-types/bindings/")]
+pub struct ProxySelection {
+    /// 代理组名
+    pub group: String,
+    /// 组内选中的节点名
+    pub node: String,
+}
+
+/// proxy_status 命令返回的聚合状态。各字段独立降级：任一环节失败只让对应字段
+/// 为 None/false，不拖垮整体（mihomo 不可达时 proxies/rule_mode 为 None 不算错误）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../packages/core-types/bindings/")]
+pub struct ProxyStatus {
+    /// sidecar 是否存活（实时探测 mihomo /version）
+    pub sidecar_alive: bool,
+    /// external-controller 实际端口（9090 顺延后的真实值；sidecar 拉起失败为 None）
+    pub controller_port: Option<u16>,
+    /// sidecar 拉起失败原因（正常为 None），供前端展示降级提示
+    pub startup_error: Option<String>,
+    /// mihomo /proxies 摘要（sidecar 不可用或不可达时为 None）
+    pub proxies: Option<ProxiesSummary>,
+    /// 当前规则模式（优先读 mihomo /configs；不可达时退化为 proxy_setting 记住的模式）
+    pub rule_mode: Option<RuleMode>,
+    /// 系统代理当前状态（注册表真实值；读取失败为 None）
+    pub system_proxy: Option<SystemProxyStatus>,
+    /// 启动自检结果：上次异常退出导致系统代理残留开启（前端据此提示恢复）
+    pub system_proxy_leftover: bool,
+    /// 残留时本软件开启前保存的旧值（提示文案用；recover 即还原此值）
+    pub leftover_previous: Option<SystemProxyStatus>,
+    /// 记住的节点选择（供 UI 初始展示兜底；事实源以 proxies[].now 为准）
+    pub remembered_selection: Option<ProxySelection>,
+}
+
 /// mihomo 内核版本（GET /version，兼作存活探测）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../packages/core-types/bindings/")]
@@ -125,5 +183,16 @@ mod tests {
         NodeDelayResult::export().unwrap();
         RuleMode::export().unwrap();
         MihomoVersion::export().unwrap();
+        ProxySelection::export().unwrap();
+        ProxyStatus::export().unwrap();
+    }
+
+    #[test]
+    fn rule_mode_str_roundtrip() {
+        for mode in [RuleMode::Rule, RuleMode::Global, RuleMode::Direct] {
+            assert_eq!(RuleMode::parse(mode.as_str()), Some(mode));
+        }
+        assert_eq!(RuleMode::parse("RULE"), None);
+        assert_eq!(RuleMode::parse(""), None);
     }
 }

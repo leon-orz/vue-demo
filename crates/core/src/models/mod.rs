@@ -8,7 +8,7 @@ pub use credential::Credential;
 pub use error::CommandError;
 pub use proxy::{
     DelayStatus, MihomoVersion, NodeDelayResult, ProxiesSummary, ProxyGroup, ProxyGroupType,
-    ProxyNode, RuleMode,
+    ProxyNode, ProxySelection, ProxyStatus, RuleMode,
 };
 pub use sysproxy::{SystemProxyCheck, SystemProxyStatus};
 pub use usage::{

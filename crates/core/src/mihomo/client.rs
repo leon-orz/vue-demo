@@ -238,6 +238,20 @@ impl MihomoClient {
         Ok(())
     }
 
+    /// GET /configs：读取当前规则模式（mihomo 侧才是事实源）。
+    /// mode 字段缺失或取值未知 → Parse 错误，由上层降级（退化为本地记住的模式）。
+    pub async fn get_mode(&self) -> Result<RuleMode, MihomoError> {
+        let resp = self
+            .send(self.client.get(self.endpoint(&["configs"])?))
+            .await?;
+        let body: ConfigsResponse = resp
+            .json()
+            .await
+            .map_err(|e| MihomoError::Parse(e.to_string()))?;
+        RuleMode::parse(&body.mode)
+            .ok_or_else(|| MihomoError::Parse(format!("未知规则模式: {}", body.mode)))
+    }
+
     /// GET /version：存活探测 + 内核版本
     pub async fn version(&self) -> Result<MihomoVersion, MihomoError> {
         let resp = self
@@ -330,6 +344,52 @@ struct HistoryEntry {
 #[derive(Debug, Deserialize)]
 struct DelayResponse {
     delay: u32,
+}
+
+/// GET /configs 响应（其余字段如 port/allow-lan 不关心，serde 宽松忽略）
+#[derive(Debug, Deserialize)]
+struct ConfigsResponse {
+    mode: String,
+}
+
+/// 收集批量测速的目标节点名（纯函数，供命令层 test_delay 使用）：
+/// - group 为 None：所有 Selector / URLTest 组的节点（排除 GLOBAL 组避免全量重复测，去重保序）；
+/// - Some(group)：指定组的全部节点，组不存在返回 Err（上层映射为 not_found）。
+pub fn collect_test_node_names(
+    summary: &ProxiesSummary,
+    group: Option<&str>,
+) -> Result<Vec<String>, String> {
+    match group {
+        Some(name) => summary
+            .groups
+            .iter()
+            .find(|g| g.name == name)
+            .map(|g| g.nodes.iter().map(|n| n.name.clone()).collect())
+            .ok_or_else(|| format!("代理组不存在: {name}")),
+        None => {
+            let mut seen = std::collections::HashSet::new();
+            let mut out = Vec::new();
+            for g in &summary.groups {
+                // GLOBAL 组类型也是 Selector，但其 all 是全量节点合集，测它等于重复劳动
+                if g.name == "GLOBAL" {
+                    continue;
+                }
+                if !matches!(
+                    g.group_type,
+                    ProxyGroupType::Selector | ProxyGroupType::UrlTest
+                ) {
+                    continue;
+                }
+                for node in &g.nodes {
+                    // 同一节点可能出现在多个组里，去重且保持首次出现顺序
+                    if seen.insert(node.name.clone()) {
+                        out.push(node.name.clone());
+                    }
+                }
+            }
+            Ok(out)
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -642,6 +702,92 @@ mod tests {
 
         let err = client(&server).set_mode(RuleMode::Rule).await.unwrap_err();
         assert!(matches!(err, MihomoError::Api(_)));
+    }
+
+    // ---- GET /configs（读取当前规则模式） ----
+
+    #[tokio::test]
+    async fn get_mode_parses_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/configs"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"mode": "global", "port": 7890})),
+            )
+            .mount(&server)
+            .await;
+
+        assert_eq!(client(&server).get_mode().await.unwrap(), RuleMode::Global);
+    }
+
+    #[tokio::test]
+    async fn get_mode_parse_error_on_unknown_mode() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/configs"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"mode": "tun"})),
+            )
+            .mount(&server)
+            .await;
+
+        let err = client(&server).get_mode().await.unwrap_err();
+        assert!(matches!(err, MihomoError::Parse(_)));
+    }
+
+    // ---- collect_test_node_names ----
+
+    fn test_summary() -> ProxiesSummary {
+        client_summary_fixture()
+    }
+
+    /// 与 get_proxies 测试同形状的摘要：Selector 组（节点选择）+ URLTest 组（自动优选）
+    /// + Unknown 组（新式组），节点跨组重复（香港 01 / 日本 01 同在两组）
+    fn client_summary_fixture() -> ProxiesSummary {
+        fn node(name: &str) -> ProxyNode {
+            ProxyNode {
+                name: name.to_string(),
+                node_type: String::new(),
+                delay_ms: None,
+                delay_status: DelayStatus::Untested,
+            }
+        }
+        fn group(name: &str, ty: ProxyGroupType, nodes: &[&str]) -> ProxyGroup {
+            ProxyGroup {
+                name: name.to_string(),
+                group_type: ty,
+                now: String::new(),
+                nodes: nodes.iter().map(|n| node(n)).collect(),
+            }
+        }
+        ProxiesSummary {
+            groups: vec![
+                group("GLOBAL", ProxyGroupType::Selector, &["香港 01", "全局独有"]),
+                group("节点选择", ProxyGroupType::Selector, &["香港 01", "DIRECT"]),
+                group("自动优选", ProxyGroupType::UrlTest, &["香港 01", "日本 01"]),
+                group("负载均衡", ProxyGroupType::LoadBalance, &["LB 节点"]),
+            ],
+        }
+    }
+
+    #[test]
+    fn collect_names_all_groups_dedupes_and_skips_global_and_non_testable() {
+        let names = collect_test_node_names(&test_summary(), None).unwrap();
+        // GLOBAL 与 LoadBalance 组被排除；香港 01 跨组重复只保留首次出现
+        assert_eq!(names, ["香港 01", "DIRECT", "日本 01"]);
+    }
+
+    #[test]
+    fn collect_names_specific_group() {
+        let names = collect_test_node_names(&test_summary(), Some("节点选择")).unwrap();
+        assert_eq!(names, ["香港 01", "DIRECT"]);
+    }
+
+    #[test]
+    fn collect_names_unknown_group_is_error() {
+        let err = collect_test_node_names(&test_summary(), Some("无此组")).unwrap_err();
+        assert!(err.contains("无此组"));
     }
 
     // ---- GET /version 与存活探测 ----

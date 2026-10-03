@@ -3,7 +3,9 @@
 
 mod client;
 
-pub use client::{MihomoClient, DEFAULT_DELAY_TIMEOUT_MS, DEFAULT_TEST_URL};
+pub use client::{
+    collect_test_node_names, MihomoClient, DEFAULT_DELAY_TIMEOUT_MS, DEFAULT_TEST_URL,
+};
 
 use thiserror::Error;
 
