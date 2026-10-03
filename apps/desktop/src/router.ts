@@ -20,18 +20,6 @@ export const router = createRouter({
     },
     { path: '/kimi', redirect: '/usage' },
     {
-      path: '/server',
-      name: 'server',
-      component: () => import('@/views/PlaceholderView.vue'),
-      meta: { title: '服务器', milestone: '阶段二交付' },
-    },
-    {
-      path: '/nas',
-      name: 'nas',
-      component: () => import('@/views/PlaceholderView.vue'),
-      meta: { title: 'NAS', milestone: '阶段二交付' },
-    },
-    {
       path: '/proxy',
       name: 'proxy',
       component: () => import('@/views/Proxy.vue'),

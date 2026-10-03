@@ -7,7 +7,9 @@
 //!   proxy_setting 表（toogl_core::proxy_setting，与 UsageService 同一库文件）；
 //! - mixed-port 同样顺延（7890…7900），但只在首跑生成配置模板时生效；实际生效值
 //!   （已有配置以文件解析为准）同样写入 proxy_setting；
-//! - 首次运行生成最小可用配置（app_data_dir/mihomo/config.yaml），已有配置不覆盖；
+//! - 首次运行生成最小可用配置（app_data_dir/mihomo/config.yaml，external-controller
+//!   带随机 secret 鉴权），已有配置不覆盖；旧版模板缺 secret 时自动补写升级，
+//!   用户手写配置（无模板标记）不动；
 //! - 拉起失败（二进制缺失 / 进程秒退 / 就绪超时）降级为错误态：proxy 模块不可用，
 //!   应用其余部分照常（参照 commands/usage.rs UsageState 的降级模式）。
 //!
@@ -16,7 +18,8 @@
 
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tauri::AppHandle;
@@ -24,7 +27,10 @@ use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt as _;
 use toogl_core::mihomo::MihomoClient;
 use toogl_core::models::CommandError;
-use toogl_core::proxy_setting::{ProxySettingStore, KEY_CONTROLLER_PORT, KEY_MIXED_PORT};
+use toogl_core::proxy_setting::{
+    generate_controller_secret, ProxySettingStore, KEY_CONTROLLER_PORT, KEY_CONTROLLER_SECRET,
+    KEY_MIXED_PORT,
+};
 
 /// external-controller 探测区间：默认 9090，被占顺延，9100 封顶
 pub const CONTROLLER_PORT_START: u16 = 9090;
@@ -38,8 +44,14 @@ pub const MIXED_PORT_END: u16 = 7900;
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 /// 就绪轮询间隔
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(200);
+/// 单次就绪探测上限：alive() 走 reqwest 默认 10s 超时，不封顶会让总上限失控；
+/// 实际单次封顶取本值与总预算剩余时长的较小者
+const READY_POLL_TIMEOUT: Duration = Duration::from_secs(2);
 /// 失败原因中附带的 mihomo 输出截断长度（防超长日志）
 const OUTPUT_SNIPPET_MAX: usize = 500;
+/// 本工具生成的配置模板标记（首跑模板头注释）：升级路径据此区分
+/// 「我们生成的旧模板（缺 secret 可自动补写）」与「用户手写配置（不动）」
+const TEMPLATE_MARKER: &str = "本文件由 Toogl 首次运行自动生成";
 
 /// 代理核心（M5）共享状态。sidecar 拉起失败时降级为错误态（存原因），
 /// 命令层统一返回可读错误，不影响应用其余模块。
@@ -54,6 +66,9 @@ pub struct ProxyCore {
     client: MihomoClient,
     /// 子进程句柄：退出时 take 出来 kill，确保不留孤儿进程
     child: Mutex<Option<CommandChild>>,
+    /// 主动回收标记：shutdown() 置位后再 kill，drain 任务据此区分
+    /// 「应用退出主动回收」与「mihomo 意外退出」，前者不打意外退出日志
+    killed_by_us: Arc<AtomicBool>,
 }
 
 impl ProxyCoreState {
@@ -90,6 +105,11 @@ impl ProxyCoreState {
 
     /// 回收 mihomo 子进程（应用退出时调用；错误态/已回收为 no-op）
     pub fn shutdown(&self) {
+        if let Ok(core) = self.inner.as_ref() {
+            // 先置主动回收标记再 kill：drain 任务看到 Terminated 事件时便知是
+            // 应用正常退出回收，不当作意外退出
+            core.killed_by_us.store(true, Ordering::SeqCst);
+        }
         let child = self
             .inner
             .as_ref()
@@ -141,7 +161,11 @@ async fn start_inner(app: &AppHandle, app_data_dir: &Path) -> Result<ProxyCore, 
         // 占位值：不写入已有配置，实际值下面从文件解析
         MIXED_PORT
     };
-    let (config_path, created) = ensure_config(&work_dir, port, mixed_port)
+    // 首跑生成配置时一并生成 external-controller 鉴权密钥（随机 hex），
+    // 防止本机任意进程随意控制内核；secret 仅在新建配置时写入模板，
+    // 已有配置不覆盖（secret 升级走下面的 resolve_existing_secret）
+    let new_secret = generate_controller_secret();
+    let (config_path, created) = ensure_config(&work_dir, port, mixed_port, &new_secret)
         .map_err(|e| format!("准备 mihomo 配置失败: {e}"))?;
     if created {
         eprintln!(
@@ -149,11 +173,42 @@ async fn start_inner(app: &AppHandle, app_data_dir: &Path) -> Result<ProxyCore, 
             config_path.display()
         );
     }
+    let content = std::fs::read_to_string(&config_path).ok();
     // 实际生效的 mixed 端口：新建即探测值；已有配置以文件内容为准（用户可手改）
-    let effective_mixed_port = std::fs::read_to_string(&config_path)
-        .ok()
-        .and_then(|content| parse_mixed_port(&content))
+    let effective_mixed_port = content
+        .as_deref()
+        .and_then(parse_mixed_port)
         .unwrap_or(mixed_port);
+
+    // 实际生效的 external-controller secret：
+    // - 本次新建配置 → 刚生成的密钥；
+    // - 已有配置且已带 secret → 沿用；
+    // - 已有配置缺 secret 且为本工具生成的旧版模板（带模板标记）→ 自动补写升级；
+    // - 用户手写配置（无标记）→ 不动配置、不带鉴权头，尊重用户配置。
+    let effective_secret: Option<String> = if created {
+        Some(new_secret)
+    } else {
+        match content.as_deref().map(resolve_existing_secret) {
+            Some((secret @ Some(_), None)) => secret,
+            Some((secret, Some(patched))) => match std::fs::write(&config_path, patched) {
+                Ok(()) => {
+                    eprintln!(
+                        "[sidecar] 检测到旧版配置模板缺 external-controller secret，已自动补写"
+                    );
+                    secret
+                }
+                // 补写失败：mihomo 将按无 secret 配置启动，client 同样不带鉴权，保持一致
+                Err(e) => {
+                    eprintln!(
+                        "[sidecar] 补写 external-controller secret 失败，本轮不启用鉴权: {e}"
+                    );
+                    None
+                }
+            },
+            // 用户手写配置缺 secret，或配置读取失败：不启用鉴权
+            _ => None,
+        }
+    };
 
     // 拉起 sidecar（二进制缺失 / 未打包时 sidecar() 或 spawn() 报错）
     let command = app
@@ -170,7 +225,7 @@ async fn start_inner(app: &AppHandle, app_data_dir: &Path) -> Result<ProxyCore, 
         .spawn()
         .map_err(|e| format!("mihomo 进程启动失败: {e}"))?;
 
-    let client = MihomoClient::new(format!("http://127.0.0.1:{port}"));
+    let client = MihomoClient::new(format!("http://127.0.0.1:{port}"), effective_secret.clone());
     if let Err(e) = wait_ready(&client, &mut rx).await {
         // 就绪失败：回收半成品进程（进程已秒退时 kill 是 no-op），不残留孤儿
         let _ = child.kill();
@@ -178,10 +233,15 @@ async fn start_inner(app: &AppHandle, app_data_dir: &Path) -> Result<ProxyCore, 
     }
 
     // 后台持续 drain 子进程输出：不读会导致管道缓冲写满后 mihomo 日志阻塞
+    let killed_by_us = Arc::new(AtomicBool::new(false));
+    let drain_flag = Arc::clone(&killed_by_us);
     tauri::async_runtime::spawn(async move {
         while let Some(event) = rx.recv().await {
             if let CommandEvent::Terminated(payload) = event {
-                eprintln!("[sidecar] mihomo 进程意外退出: {:?}", payload.code);
+                // 应用正常退出由 shutdown() 置标记后主动 kill，不属意外退出，不打告警日志
+                if !drain_flag.load(Ordering::SeqCst) {
+                    eprintln!("[sidecar] mihomo 进程意外退出: {:?}", payload.code);
+                }
             }
         }
     });
@@ -199,6 +259,12 @@ async fn start_inner(app: &AppHandle, app_data_dir: &Path) -> Result<ProxyCore, 
             {
                 eprintln!("[sidecar] mixed 端口写库失败（不影响本轮运行）: {e}");
             }
+            // 鉴权密钥持久化：供外部查询与升级路径核对；失败同样不影响本轮运行
+            if let Some(secret) = &effective_secret {
+                if let Err(e) = store.set(KEY_CONTROLLER_SECRET, secret).await {
+                    eprintln!("[sidecar] controller secret 写库失败（不影响本轮运行）: {e}");
+                }
+            }
         }
         Err(e) => eprintln!("[sidecar] 设置库打开失败（不影响本轮运行）: {e}"),
     }
@@ -207,16 +273,36 @@ async fn start_inner(app: &AppHandle, app_data_dir: &Path) -> Result<ProxyCore, 
         port,
         client,
         child: Mutex::new(Some(child)),
+        killed_by_us,
     })
 }
 
 /// 拉起后就绪等待：轮询 /version 直到存活或超时；期间进程退出（秒退）立即失败，
 /// 失败原因附带 mihomo 的 stderr/stdout 片段便于定位（配置错误、端口被抢等）。
+/// 单次探测用 timeout 封顶（单次上限与总预算剩余取小），保证总耗时不超过 READY_TIMEOUT。
 async fn wait_ready(
     client: &MihomoClient,
     rx: &mut tauri::async_runtime::Receiver<CommandEvent>,
 ) -> Result<(), String> {
-    let deadline = Instant::now() + READY_TIMEOUT;
+    wait_ready_within(
+        client,
+        rx,
+        READY_TIMEOUT,
+        READY_POLL_INTERVAL,
+        READY_POLL_TIMEOUT,
+    )
+    .await
+}
+
+/// [`wait_ready`] 的参数化实现，便于单测覆盖超时边界
+async fn wait_ready_within(
+    client: &MihomoClient,
+    rx: &mut tauri::async_runtime::Receiver<CommandEvent>,
+    total_timeout: Duration,
+    poll_interval: Duration,
+    per_poll_timeout: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now() + total_timeout;
     let mut output = String::new();
     loop {
         // 先排空已到达的进程事件：秒退能第一时间感知，无需等满超时
@@ -236,16 +322,20 @@ async fn wait_ready(
                 _ => {}
             }
         }
-        if client.alive().await {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
+        let now = Instant::now();
+        if now >= deadline {
             return Err(format!(
-                "mihomo 就绪等待超时（{READY_TIMEOUT:?} 内 /version 未应答）: {}",
+                "mihomo 就绪等待超时（{total_timeout:?} 内 /version 未应答）: {}",
                 snippet(&output)
             ));
         }
-        tokio::time::sleep(READY_POLL_INTERVAL).await;
+        // 单次探测封顶：alive() 内部是 reqwest 默认 10s 超时，不封顶的话
+        // 一次挂死的请求就会让总上限失控；取单次上限与剩余预算的较小者
+        let budget = per_poll_timeout.min(deadline - now);
+        if matches!(tokio::time::timeout(budget, client.alive()).await, Ok(true)) {
+            return Ok(());
+        }
+        tokio::time::sleep(poll_interval).await;
     }
 }
 
@@ -278,7 +368,8 @@ fn pick_port_in(start: u16, end: u16, probe: impl Fn(u16) -> bool) -> Option<u16
 /// 首跑最小可用配置模板（纯函数便于单测）。
 /// 分流规则模板与节点导入是后续任务（《02-开发计划》M5 节），这里只保证内核可启动、
 /// RESTful API 可用、全部流量直连兜底。
-fn render_initial_config(controller_port: u16, mixed_port: u16) -> String {
+/// external-controller 带随机 secret 鉴权：本机其他进程不知道密钥即无法控制内核。
+fn render_initial_config(controller_port: u16, mixed_port: u16, secret: &str) -> String {
     format!(
         r#"# ============================================================
 # Toogl（图格）mihomo 初始配置模板
@@ -295,6 +386,10 @@ allow-lan: false
 # RESTful API 只绑回环；端口由 Toogl 启动时在 9090~9100 探测顺延，
 # 手工改配置后需与本文件端口一致，否则软件侧会连不上
 external-controller: 127.0.0.1:{controller_port}
+
+# RESTful API 鉴权密钥：Toogl 首跑随机生成，同时持久化到 proxy_setting 表
+# （KEY_CONTROLLER_SECRET）；本机不知道密钥的进程无法控制内核
+secret: {secret}
 
 mode: rule
 log-level: warning
@@ -316,19 +411,78 @@ rules:
     )
 }
 
-/// 确保 config.yaml 存在：不存在则写初始模板。
+/// 确保 config.yaml 存在：不存在则以给定 secret 写初始模板。
 /// 返回（配置文件路径，是否本次新建）。
 fn ensure_config(
     work_dir: &Path,
     controller_port: u16,
     mixed_port: u16,
+    secret: &str,
 ) -> std::io::Result<(PathBuf, bool)> {
     let path = work_dir.join("config.yaml");
     if path.exists() {
         return Ok((path, false));
     }
-    std::fs::write(&path, render_initial_config(controller_port, mixed_port))?;
+    std::fs::write(
+        &path,
+        render_initial_config(controller_port, mixed_port, secret),
+    )?;
     Ok((path, true))
+}
+
+/// 纯解析：取顶层 `secret: <v>` 行的密钥（忽略注释与缩进变体），便于单测。
+/// 与 parse_mixed_port 同款极简行解析，不引入 YAML 解析器。
+fn parse_controller_secret(config: &str) -> Option<String> {
+    for line in config.lines() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("secret:") {
+            let value = value.trim();
+            // secret 为空串（secret: '' 或 secret:）视为未配置
+            if !value.is_empty() && value != "''" && value != "\"\"" {
+                return Some(value.to_string());
+            }
+            return None;
+        }
+    }
+    None
+}
+
+/// 向配置文本注入 `secret: <v>` 行：优先插在 external-controller 行之后，
+/// 找不到（模板结构被手改）则追加到文件末尾。仅在模板升级路径调用。
+fn inject_controller_secret(config: &str, secret: &str) -> String {
+    let mut lines: Vec<String> = config.lines().map(str::to_string).collect();
+    let pos = lines
+        .iter()
+        .position(|l| l.trim_start().starts_with("external-controller:"));
+    let line = format!("secret: {secret}");
+    match pos {
+        Some(i) => lines.insert(i + 1, line),
+        None => lines.push(line),
+    }
+    let mut out = lines.join("\n");
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+/// 已有配置的 secret 决策（纯函数便于单测），返回（生效 secret，需写回的补写后内容）：
+/// - 配置里已有 secret → 沿用，不写回；
+/// - 缺 secret 且带本工具模板标记（我们生成的旧版模板）→ 生成新密钥并补写；
+/// - 缺 secret 且为用户手写配置（无标记）→ 不动配置，返回 None（client 不带鉴权头）。
+fn resolve_existing_secret(content: &str) -> (Option<String>, Option<String>) {
+    if let Some(secret) = parse_controller_secret(content) {
+        return (Some(secret), None);
+    }
+    if !content.contains(TEMPLATE_MARKER) {
+        return (None, None);
+    }
+    let secret = generate_controller_secret();
+    let patched = inject_controller_secret(content, &secret);
+    (Some(secret), Some(patched))
 }
 
 /// 解析系统代理开关指向的本地 mixed 端口，优先级：
@@ -413,15 +567,19 @@ mod tests {
 
     #[test]
     fn initial_config_contains_port_and_skeleton() {
-        let yaml = render_initial_config(9093, 7895);
+        let yaml = render_initial_config(9093, 7895, "test-secret-abc");
         // mixed-port 首跑顺延后的真实值写入模板
         assert!(yaml.contains("mixed-port: 7895"));
         assert!(yaml.contains("external-controller: 127.0.0.1:9093"));
+        // external-controller 鉴权密钥写入模板
+        assert!(yaml.contains("secret: test-secret-abc"));
         assert!(yaml.contains("allow-lan: false"));
         assert!(yaml.contains("proxies: []"));
         assert!(yaml.contains("type: select"));
         assert!(yaml.contains("- DIRECT"));
         assert!(yaml.contains("- MATCH,节点选择"));
+        // 模板标记存在（升级路径据此区分本工具模板与用户手写配置）
+        assert!(yaml.contains(TEMPLATE_MARKER));
     }
 
     #[test]
@@ -448,11 +606,12 @@ mod tests {
     #[test]
     fn ensure_config_creates_template_when_missing() {
         let tmp = tempfile::tempdir().unwrap();
-        let (path, created) = ensure_config(tmp.path(), 9091, 7890).unwrap();
+        let (path, created) = ensure_config(tmp.path(), 9091, 7890, "first-run-secret").unwrap();
         assert!(created);
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("external-controller: 127.0.0.1:9091"));
         assert!(content.contains("mixed-port: 7890"));
+        assert!(content.contains("secret: first-run-secret"));
     }
 
     // ---- mixed-port 解析（系统代理开关指向的本地入口） ----
@@ -461,11 +620,11 @@ mod tests {
     fn parse_mixed_port_from_template_and_edited() {
         // 初始模板按传入端口生成
         assert_eq!(
-            parse_mixed_port(&render_initial_config(9090, 7890)),
+            parse_mixed_port(&render_initial_config(9090, 7890, "s")),
             Some(7890)
         );
         assert_eq!(
-            parse_mixed_port(&render_initial_config(9090, 7897)),
+            parse_mixed_port(&render_initial_config(9090, 7897, "s")),
             Some(7897)
         );
         // 用户手改为其他端口
@@ -510,13 +669,166 @@ mod tests {
             "# 用户手工配置\nexternal-controller: 127.0.0.1:9000\n",
         )
         .unwrap();
-        let (returned, created) = ensure_config(tmp.path(), 9095, 7890).unwrap();
+        let (returned, created) = ensure_config(tmp.path(), 9095, 7890, "unused-secret").unwrap();
         assert_eq!(returned, path);
         assert!(!created);
         // 内容原样保留（哪怕端口与本次探测不一致）
         let content = std::fs::read_to_string(tmp.path().join("config.yaml")).unwrap();
         assert!(content.contains("用户手工配置"));
         assert!(content.contains("127.0.0.1:9000"));
+    }
+
+    // ---- external-controller secret 解析 / 注入 / 升级决策 ----
+
+    #[test]
+    fn parse_controller_secret_from_template_and_edited() {
+        // 初始模板含生成值
+        assert_eq!(
+            parse_controller_secret(&render_initial_config(9090, 7890, "abc123")),
+            Some("abc123".to_string())
+        );
+        // 用户手改 secret
+        assert_eq!(
+            parse_controller_secret("external-controller: 127.0.0.1:9090\nsecret: my-own\n"),
+            Some("my-own".to_string())
+        );
+        // 缺失 / 注释 / 空值均视为未配置
+        assert_eq!(parse_controller_secret("mode: rule\n"), None);
+        assert_eq!(parse_controller_secret("# secret: abc\n"), None);
+        assert_eq!(parse_controller_secret("secret: \n"), None);
+        assert_eq!(parse_controller_secret("secret: ''\n"), None);
+    }
+
+    #[test]
+    fn inject_controller_secret_after_external_controller_line() {
+        let old = "# 头注释\nexternal-controller: 127.0.0.1:9093\nmode: rule\n";
+        let patched = inject_controller_secret(old, "new-secret");
+        assert_eq!(
+            patched,
+            "# 头注释\nexternal-controller: 127.0.0.1:9093\nsecret: new-secret\nmode: rule\n"
+        );
+        // 注入后可被解析回来
+        assert_eq!(
+            parse_controller_secret(&patched),
+            Some("new-secret".to_string())
+        );
+    }
+
+    #[test]
+    fn inject_controller_secret_appends_when_no_controller_line() {
+        let patched = inject_controller_secret("mode: rule\n", "s1");
+        assert!(patched.contains("mode: rule"));
+        assert!(patched.contains("secret: s1"));
+        assert!(patched.ends_with('\n'));
+        assert_eq!(parse_controller_secret(&patched), Some("s1".to_string()));
+    }
+
+    #[test]
+    fn resolve_existing_secret_keeps_configured_secret() {
+        let content = render_initial_config(9090, 7890, "existing-secret");
+        let (secret, patched) = resolve_existing_secret(&content);
+        assert_eq!(secret, Some("existing-secret".to_string()));
+        assert!(patched.is_none());
+    }
+
+    #[test]
+    fn resolve_existing_secret_patches_our_legacy_template() {
+        // 模拟旧版本生成的模板：带模板标记、无 secret 行
+        let legacy = render_initial_config(9090, 7890, "x")
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("secret:"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(legacy.contains(TEMPLATE_MARKER));
+        assert_eq!(parse_controller_secret(&legacy), None);
+
+        let (secret, patched) = resolve_existing_secret(&legacy);
+        let secret = secret.expect("旧模板应自动补写 secret");
+        let patched = patched.expect("旧模板应产出补写后的内容");
+        assert_eq!(secret.len(), 32);
+        // 补写后内容可解析出同一 secret，且原有行保留
+        assert_eq!(parse_controller_secret(&patched), Some(secret));
+        assert!(patched.contains("external-controller: 127.0.0.1:9090"));
+        assert!(patched.contains(TEMPLATE_MARKER));
+    }
+
+    #[test]
+    fn resolve_existing_secret_leaves_user_handwritten_config_alone() {
+        // 用户手写配置（无模板标记、无 secret）：不动配置、不启用鉴权
+        let user = "# 用户手工配置\nexternal-controller: 127.0.0.1:9000\nmode: rule\n";
+        let (secret, patched) = resolve_existing_secret(user);
+        assert_eq!(secret, None);
+        assert_eq!(patched, None);
+    }
+
+    // ---- 就绪等待（wait_ready）超时边界 ----
+
+    #[tokio::test]
+    async fn wait_ready_times_out_within_total_budget() {
+        // 端口 1 必拒连：每次探测快速失败，总耗时受 total_timeout 约束
+        let client = MihomoClient::new("http://127.0.0.1:1", None);
+        let (_tx, mut rx) = tauri::async_runtime::channel(16);
+        let start = Instant::now();
+        let err = wait_ready_within(
+            &client,
+            &mut rx,
+            Duration::from_millis(300),
+            Duration::from_millis(50),
+            Duration::from_millis(100),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("就绪等待超时"));
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn wait_ready_caps_single_hanging_poll() {
+        // 接受连接但永不响应的服务端，模拟 mihomo 挂死：
+        // 单次探测被 per_poll_timeout 封顶，总耗时仍在 total_timeout 量级，
+        // 而非 reqwest 默认的 10s 单次超时
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            while let Ok((conn, _)) = listener.accept() {
+                held.push(conn); // 持有连接，永不写响应
+            }
+        });
+        let client = MihomoClient::new(format!("http://{addr}"), None);
+        let (_tx, mut rx) = tauri::async_runtime::channel(16);
+        let start = Instant::now();
+        let err = wait_ready_within(
+            &client,
+            &mut rx,
+            Duration::from_millis(300),
+            Duration::from_millis(50),
+            Duration::from_millis(100),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("就绪等待超时"));
+        // 关键断言：单次挂死被封顶，总耗时远小于单次 reqwest 默认超时（10s）
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn wait_ready_fails_fast_on_process_exit() {
+        use tauri_plugin_shell::process::TerminatedPayload;
+        let client = MihomoClient::new("http://127.0.0.1:1", None);
+        let (tx, mut rx) = tauri::async_runtime::channel(16);
+        tx.send(CommandEvent::Terminated(TerminatedPayload {
+            code: Some(2),
+            signal: None,
+        }))
+        .await
+        .unwrap();
+        let start = Instant::now();
+        // 用默认 wait_ready（总上限 10s）：进程秒退应立即失败，不等满超时
+        let err = wait_ready(&client, &mut rx).await.unwrap_err();
+        assert!(err.contains("立即退出"));
+        assert!(err.contains("2"));
+        assert!(start.elapsed() < Duration::from_secs(2));
     }
 
     // ---- 降级态 ----

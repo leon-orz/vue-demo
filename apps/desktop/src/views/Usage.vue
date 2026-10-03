@@ -53,7 +53,6 @@ onMounted(() => usage.init(settings.kimiSessionsDir || undefined))
               }}
             </template>
           </template>
-          <template v-else-if="usage.scanError">扫描失败：{{ usage.scanError }}</template>
           <template v-else>正在后台扫描日志…</template>
         </p>
       </div>

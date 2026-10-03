@@ -1,7 +1,7 @@
 //! M5 代理模块设置的简单 KV 持久化（proxy_setting 表，migration 0005）。
 //!
-//! 当前记录 mihomo sidecar external-controller 与 mixed-port 实际端口（冲突顺延后的
-//! 真实值）、记住的节点选择与规则模式；系统代理状态备份（sysproxy::ProxyBackupState
+//! 当前记录 mihomo sidecar external-controller 实际端口与鉴权密钥（secret）、
+//! mixed-port 实际端口（冲突顺延后的真实值）、记住的节点选择与规则模式；系统代理状态备份（sysproxy::ProxyBackupState
 //! JSON 的 SQLite 版 ProxyStateStore）也基于本表实现（见 [`SqliteProxyStateStore`]）。
 //! 桌面端与 hub 各自连自己的库文件，本模块只做纯 KV 读写。
 
@@ -13,6 +13,10 @@ use crate::sysproxy::{ProxyBackupState, ProxyStateStore, SysProxyError};
 
 /// sidecar external-controller 实际端口（值：十进制端口号字符串）
 pub const KEY_CONTROLLER_PORT: &str = "mihomo.controller_port";
+/// sidecar external-controller 鉴权密钥（值：随机 hex 串）。
+/// 首跑生成配置模板时随机生成并同时写入 config.yaml 的 secret 字段与本表；
+/// 已有配置缺 secret 且为本工具生成的模板时启动时自动补写（见 desktop 侧 sidecar.rs）
+pub const KEY_CONTROLLER_SECRET: &str = "mihomo.controller_secret";
 /// sidecar 本地混合代理（mixed-port）实际端口（值：十进制端口号字符串）。
 /// 首跑生成配置时在 7890~7900 顺延探测；已有配置以 config.yaml 解析值为准，
 /// sidecar 每次拉起都会刷新本 key
@@ -23,6 +27,12 @@ pub const KEY_PROXY_BACKUP: &str = "sysproxy.backup_state";
 pub const KEY_SELECTION: &str = "proxy.selection";
 /// 记住的规则模式（值：rule/global/direct 小写串；事实源为 mihomo /configs，仅降级兜底）
 pub const KEY_RULE_MODE: &str = "proxy.rule_mode";
+
+/// 生成 external-controller 鉴权密钥：32 位随机 hex（UUID v4 去连字符）。
+/// 纯本地随机，不回源；写入 mihomo 配置 secret 字段并持久化到 proxy_setting。
+pub fn generate_controller_secret() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
+}
 
 /// proxy_setting 表读写器：持有一个 SQLite 连接池
 #[derive(Debug, Clone)]
@@ -42,11 +52,6 @@ impl ProxySettingStore {
         let pool = SqlitePool::connect_with(options).await?;
         crate::db::migrate(&pool).await?;
         Ok(Self { pool })
-    }
-
-    /// 复用已有连接池（调用方保证迁移已执行）
-    pub fn from_pool(pool: SqlitePool) -> Self {
-        Self { pool }
     }
 
     /// 无记录返回 Ok(None)
@@ -180,6 +185,30 @@ mod tests {
     async fn get_returns_none_when_missing() {
         let (_tmp, store) = temp_store().await;
         assert_eq!(store.get(KEY_CONTROLLER_PORT).await.unwrap(), None);
+    }
+
+    // ---- external-controller secret 生成与持久化 ----
+
+    #[test]
+    fn generate_controller_secret_is_random_hex() {
+        let a = generate_controller_secret();
+        let b = generate_controller_secret();
+        // UUID v4 simple 形态：32 位小写 hex
+        assert_eq!(a.len(), 32);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        // 两次生成必然不同（随机性来源，碰撞概率可忽略）
+        assert_ne!(a, b);
+    }
+
+    #[tokio::test]
+    async fn controller_secret_persists_via_kv() {
+        let (_tmp, store) = temp_store().await;
+        let secret = generate_controller_secret();
+        store.set(KEY_CONTROLLER_SECRET, &secret).await.unwrap();
+        assert_eq!(
+            store.get(KEY_CONTROLLER_SECRET).await.unwrap().as_deref(),
+            Some(secret.as_str())
+        );
     }
 
     #[tokio::test]

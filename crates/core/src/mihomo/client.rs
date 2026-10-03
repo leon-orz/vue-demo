@@ -1,6 +1,8 @@
 //! mihomo RESTful API 客户端实现（M5 核心三件套的远端一半；系统代理在 sysproxy 模块）。
 //! 端点覆盖：GET /proxies、PUT /proxies/{group}、GET /proxies/{name}/delay、
 //! PATCH /configs、GET /version。reqwest client 进程级复用（同 adapters 的静态模式）。
+//! 鉴权：构造时传入 external-controller secret（Option），所有请求自动带
+//! `Authorization: Bearer <secret>` 头；未配置 secret 的旧部署不带头。
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -38,31 +40,48 @@ fn shared_client() -> reqwest::Client {
 #[derive(Debug, Clone)]
 pub struct MihomoClient {
     base_url: String,
+    /// external-controller 鉴权密钥（mihomo 配置 secret 字段）；
+    /// Some 时所有请求带 `Authorization: Bearer <secret>` 头
+    secret: Option<String>,
     client: reqwest::Client,
 }
 
 impl MihomoClient {
-    pub fn new(base_url: impl Into<String>) -> Self {
+    pub fn new(base_url: impl Into<String>, secret: Option<String>) -> Self {
         Self {
             base_url: base_url.into(),
+            secret,
             client: shared_client(),
         }
     }
 
     /// 自定义超时的独立客户端（主要用于测试超时路径）
-    pub fn with_timeout(base_url: impl Into<String>, timeout: Duration) -> Self {
+    pub fn with_timeout(
+        base_url: impl Into<String>,
+        secret: Option<String>,
+        timeout: Duration,
+    ) -> Self {
         let client = reqwest::Client::builder()
             .timeout(timeout)
             .build()
             .expect("reqwest client 构建失败");
         Self {
             base_url: base_url.into(),
+            secret,
             client,
         }
     }
 
     pub fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    /// 配置了 secret 时为请求附带 Bearer 鉴权头，未配置则原样返回
+    fn authed(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.secret {
+            Some(secret) => req.bearer_auth(secret),
+            None => req,
+        }
     }
 
     /// 拼接端点 URL；组名/节点名经 path segment 编码（名字可含空格与 emoji）
@@ -96,7 +115,7 @@ impl MihomoClient {
     /// （meanDelay 优先，退化为 delay；值为 0 视为超时，空 history 为无记录）。
     pub async fn get_proxies(&self) -> Result<ProxiesSummary, MihomoError> {
         let resp = self
-            .send(self.client.get(self.endpoint(&["proxies"])?))
+            .send(self.authed(self.client.get(self.endpoint(&["proxies"])?)))
             .await?;
         let body: ProxiesResponse = resp
             .json()
@@ -137,9 +156,11 @@ impl MihomoClient {
     /// 组不存在或节点不在组内时 mihomo 返回 4xx，映射为 Api 错误。
     pub async fn select_proxy(&self, group: &str, node: &str) -> Result<(), MihomoError> {
         self.send(
-            self.client
-                .put(self.endpoint(&["proxies", group])?)
-                .json(&serde_json::json!({ "name": node })),
+            self.authed(
+                self.client
+                    .put(self.endpoint(&["proxies", group])?)
+                    .json(&serde_json::json!({ "name": node })),
+            ),
         )
         .await?;
         Ok(())
@@ -153,13 +174,14 @@ impl MihomoClient {
         timeout_ms: u32,
         url: &str,
     ) -> Result<NodeDelayResult, MihomoError> {
-        let req = self
-            .client
-            .get(self.endpoint(&["proxies", name, "delay"])?)
-            .query(&[
-                ("timeout", timeout_ms.to_string()),
-                ("url", url.to_string()),
-            ]);
+        let req = self.authed(
+            self.client
+                .get(self.endpoint(&["proxies", name, "delay"])?)
+                .query(&[
+                    ("timeout", timeout_ms.to_string()),
+                    ("url", url.to_string()),
+                ]),
+        );
         let resp = req
             .send()
             .await
@@ -230,9 +252,11 @@ impl MihomoClient {
     /// PATCH /configs：规则模式切换，body {"mode": "rule|global|direct"}。
     pub async fn set_mode(&self, mode: RuleMode) -> Result<(), MihomoError> {
         self.send(
-            self.client
-                .patch(self.endpoint(&["configs"])?)
-                .json(&serde_json::json!({ "mode": mode })),
+            self.authed(
+                self.client
+                    .patch(self.endpoint(&["configs"])?)
+                    .json(&serde_json::json!({ "mode": mode })),
+            ),
         )
         .await?;
         Ok(())
@@ -242,7 +266,7 @@ impl MihomoClient {
     /// mode 字段缺失或取值未知 → Parse 错误，由上层降级（退化为本地记住的模式）。
     pub async fn get_mode(&self) -> Result<RuleMode, MihomoError> {
         let resp = self
-            .send(self.client.get(self.endpoint(&["configs"])?))
+            .send(self.authed(self.client.get(self.endpoint(&["configs"])?)))
             .await?;
         let body: ConfigsResponse = resp
             .json()
@@ -255,7 +279,7 @@ impl MihomoClient {
     /// GET /version：存活探测 + 内核版本
     pub async fn version(&self) -> Result<MihomoVersion, MihomoError> {
         let resp = self
-            .send(self.client.get(self.endpoint(&["version"])?))
+            .send(self.authed(self.client.get(self.endpoint(&["version"])?)))
             .await?;
         let body: VersionResponse = resp
             .json()
@@ -402,11 +426,11 @@ struct VersionResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{body_json, method, path, query_param};
+    use wiremock::matchers::{body_json, header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn client(server: &MockServer) -> MihomoClient {
-        MihomoClient::new(server.uri())
+        MihomoClient::new(server.uri(), None)
     }
 
     // ---- /proxies ----
@@ -814,7 +838,7 @@ mod tests {
     #[tokio::test]
     async fn unreachable_when_connection_refused() {
         // 端口 1 必拒连 → Unreachable（区分于 Api/Parse），存活探测为 false
-        let c = MihomoClient::new("http://127.0.0.1:1");
+        let c = MihomoClient::new("http://127.0.0.1:1", None);
         let err = c.version().await.unwrap_err();
         assert!(matches!(err, MihomoError::Unreachable(_)));
         assert!(!c.alive().await);
@@ -828,14 +852,53 @@ mod tests {
             .mount(&server)
             .await;
 
-        let c = MihomoClient::with_timeout(server.uri(), Duration::from_millis(100));
+        let c = MihomoClient::with_timeout(server.uri(), None, Duration::from_millis(100));
         let err = c.get_proxies().await.unwrap_err();
         assert!(matches!(err, MihomoError::Unreachable(_)));
     }
 
     #[test]
     fn client_holds_base_url() {
-        let c = MihomoClient::new("http://127.0.0.1:9090");
+        let c = MihomoClient::new("http://127.0.0.1:9090", None);
         assert_eq!(c.base_url(), "http://127.0.0.1:9090");
+    }
+
+    // ---- external-controller secret 鉴权头 ----
+
+    #[tokio::test]
+    async fn bearer_auth_header_sent_when_secret_configured() {
+        let server = MockServer::start().await;
+        // mock 只响应带正确 Authorization 头的请求；其余一律 404（wiremock 无匹配默认行为）
+        Mock::given(method("GET"))
+            .and(path("/version"))
+            .and(header("authorization", "Bearer test-secret-123"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"version": "v1.19.32", "meta": true})),
+            )
+            .mount(&server)
+            .await;
+
+        let authed = MihomoClient::new(server.uri(), Some("test-secret-123".to_string()));
+        assert!(authed.alive().await);
+
+        // 不带 secret → 无 Authorization 头 → 匹配不到 mock → 404 Api 错误
+        let anon = client(&server);
+        let err = anon.version().await.unwrap_err();
+        assert!(matches!(err, MihomoError::Api(_)));
+    }
+
+    #[tokio::test]
+    async fn bearer_auth_header_applies_to_write_endpoints() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/configs"))
+            .and(header("authorization", "Bearer write-secret"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let c = MihomoClient::new(server.uri(), Some("write-secret".to_string()));
+        c.set_mode(RuleMode::Global).await.unwrap();
     }
 }

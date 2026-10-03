@@ -7,6 +7,7 @@ pub mod datasource;
 pub mod db;
 pub mod keystore;
 pub mod kimicode;
+pub mod logs;
 pub mod mihomo;
 pub mod mimocode;
 pub mod models;

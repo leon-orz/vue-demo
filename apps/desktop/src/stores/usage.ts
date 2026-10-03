@@ -181,7 +181,6 @@ export const useUsageStore = defineStore('usage', () => {
   const accounts = ref<Partial<Record<Platform, PlatformAccountInfo | null>>>({})
 
   const scanning = ref(false)
-  const scanError = ref<string | null>(null)
   const lastScanAt = ref<string | null>(null)
   /** 最近一次全平台扫描的分平台报告（单平台失败不影响其他平台） */
   const lastScanReports = ref<PlatformScanReport[]>([])
@@ -282,24 +281,24 @@ export const useUsageStore = defineStore('usage', () => {
   async function scan(sessionsDir?: string) {
     if (scanning.value) return
     scanning.value = true
-    scanError.value = null
     try {
       const reports = await api.scanUsageLogs(undefined, sessionsDir)
       lastScanReports.value = reports
       lastScanAt.value = new Date().toISOString()
-      // 单平台失败是常态（如日志目录不存在），只有全部失败才当作扫描错误提示
-      if (reports.length > 0 && reports.every((r) => r.error !== null)) {
-        scanError.value = reports
-          .map((r) => `${PLATFORM_LABELS[r.platform]}：${r.error}`)
-          .join('；')
-      }
       await Promise.all([loadOverview(), loadAggregates()])
       // MiMo 配额是纯本地日志推算：扫描后顺手重算，进度条保持新鲜（未配置套餐则跳过，不报错）
       if (accounts.value.mimo?.quota_total != null) {
         await refreshQuota('mimo')
       }
     } catch (err) {
-      scanError.value = toCommandError(err).message
+      // 命令级失败（无分平台报告）：合成全平台失败报告，错误统一经 lastScanFailures 展示
+      const message = toCommandError(err).message
+      lastScanReports.value = USAGE_PLATFORMS.map((platform) => ({
+        platform,
+        report: null,
+        error: message,
+      }))
+      lastScanAt.value = new Date().toISOString()
     } finally {
       scanning.value = false
     }
@@ -385,7 +384,6 @@ export const useUsageStore = defineStore('usage', () => {
     quotaLoading,
     accounts,
     scanning,
-    scanError,
     lastScanAt,
     lastScanReports,
     lastScanEventsAdded,

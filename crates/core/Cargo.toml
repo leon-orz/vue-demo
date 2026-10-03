@@ -19,6 +19,8 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
 dirs = "6"
+# mihomo external-controller 随机 secret 生成（v4 随机 UUID，simple 形态即 32 位 hex）
+uuid = { version = "1", features = ["v4"] }
 
 # 系统代理（sysproxy 模块）仅 Windows 编译：注册表读写 + wininet 变更通知
 # （两个版本均已在依赖树锁定：winreg 经 embed-resource、windows-sys 0.59 经 winreg）

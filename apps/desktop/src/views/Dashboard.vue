@@ -45,19 +45,24 @@ function quotaSummary(platform: Platform): string {
       return `套餐已用 ${(progress * 100).toFixed(1)}%${progress > 1 ? '（已超额）' : ''}`
     }
     default: {
-      // kimi / deepseek：按量余额
+      // kimi / deepseek：按量余额；凭据失效（unauthorized）与 QuotaCard 一致，优先引导重新配置
       if (!account?.has_credential) return '余额未配置，去设置页配置 API Key'
+      if (usage.quotaErrors[platform]?.kind === 'unauthorized')
+        return '凭据失效，请去设置页重新配置'
       if (snapshot?.remaining == null) return '余额暂无数据，去用量页刷新'
       return `余额 ${formatMoney(snapshot.remaining)}`
     }
   }
 }
 
-/** 是否需要「去设置页配置」引导（未配置时卡片显示引导入口，不报错） */
+/** 是否需要「去设置页配置」引导（未配置或凭据失效时卡片显示引导入口，不报错） */
 function needsSetup(platform: Platform): boolean {
   if (platform === 'omp') return false
   if (platform === 'mimo') return usage.accounts[platform]?.quota_total == null
-  return !usage.accounts[platform]?.has_credential
+  return (
+    !usage.accounts[platform]?.has_credential ||
+    usage.quotaErrors[platform]?.kind === 'unauthorized'
+  )
 }
 
 // Dashboard 只读各模块缓存数据；用量 store 未初始化时补一次（后台扫描同用量页），代理状态拉一次快照

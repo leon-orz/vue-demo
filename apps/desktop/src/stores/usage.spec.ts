@@ -113,12 +113,13 @@ describe('usage store 聚合加载', () => {
     expect(mocks.scanUsageLogs).toHaveBeenCalledTimes(1)
   })
 
-  it('扫描命令失败时错误进 scanError，不影响已加载数据', async () => {
+  it('扫描命令失败时合成全平台失败报告，错误经 lastScanFailures 展示，不影响已加载数据', async () => {
     mocks.scanUsageLogs.mockRejectedValue(new Error('数据库锁定'))
     const store = useUsageStore()
     await store.init()
     await vi.waitFor(() => expect(store.scanning).toBe(false))
-    expect(store.scanError).toContain('数据库锁定')
+    expect(store.lastScanFailures.length).toBeGreaterThan(0)
+    expect(store.lastScanFailures.every((r) => r.error === '数据库锁定')).toBe(true)
     expect(store.todaySummary).not.toBeNull()
   })
 
@@ -130,12 +131,11 @@ describe('usage store 聚合加载', () => {
     const store = useUsageStore()
     await store.init()
     await vi.waitFor(() => expect(store.scanning).toBe(false))
-    expect(store.scanError).toBeNull()
     expect(store.lastScanFailures).toHaveLength(1)
     expect(store.lastScanFailures[0].platform).toBe('mimo')
   })
 
-  it('全部平台扫描失败时聚合为一条 scanError', async () => {
+  it('全部平台扫描失败时逐平台进入 lastScanFailures', async () => {
     mocks.scanUsageLogs.mockResolvedValue([
       scanReportOf('kimi', 0, '目录不存在'),
       scanReportOf('mimo', 0, '目录不存在'),
@@ -143,8 +143,7 @@ describe('usage store 聚合加载', () => {
     const store = useUsageStore()
     await store.init()
     await vi.waitFor(() => expect(store.scanning).toBe(false))
-    expect(store.scanError).toContain('Kimi')
-    expect(store.scanError).toContain('MiMo')
+    expect(store.lastScanFailures.map((r) => r.platform)).toEqual(['kimi', 'mimo'])
   })
 
   it('加载失败时不抛异常、不置 initialized、错误进 loadError，且不启动后台扫描', async () => {

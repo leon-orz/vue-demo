@@ -11,11 +11,11 @@ Toogl（图格）是一个**个人自用的 Windows 桌面工具箱**：Tauri 2 
 
 - **M1 AI 用量统计（多平台聚合）**：解析 kimi-code `~/.kimi-code/sessions/**/wire.jsonl`、MiMo Code `~/.local/share/mimocode/mimocode.db`（SQLite 只读）、oh-my-pi（omp）`~/.omp/agent/sessions/**/*.jsonl` 三类本地 CLI 日志，统一聚合 token 用量 / 缓存命中率 / 趋势 / 分布；配额余额分平台适配（Kimi 非官方 usages 接口 best-effort、DeepSeek 官方 `/user/balance`、MiMo 手录总额 + 本地推算）。只读聚合，不转发流量。不支持 Codex CLI 日志；GLM 套餐不列入；dsh 为阶段三预留。
 - **M2 我的 API 平台（已取消）**：不再自建 new-api 网关，需求并入 M1，编号保留不复用。取消原因：官方套餐直连已够用、MiMo 条款禁止套餐额度用于非编程场景、免去网关运维负担。
-- **M3 服务器 / M4 NAS**：一体机的监控、容器管理、WoL 远程开机、磁盘健康（阶段二起）。
+- **M3 服务器 / M4 NAS（已取消 2026-10-02）**：原为一体机的监控、容器管理、WoL 远程开机、磁盘健康等（阶段二起）。取消原因：用户近期无时间维护一体机；编号保留不复用。
 - **M5 魔法工具**：内嵌 mihomo sidecar（RESTful API 默认 9090），做节点切换、系统代理开关、规则分流。目标场景为软件与网站（不考虑游戏）；节点导入以订阅链接为主（用户当前为商家包月订阅）、手动粘贴为辅（后续 VPS 自建）。
 - **M6 设置 + Dashboard**。
 
-分阶段开发：阶段一（不依赖新硬件，桌面端直连模式）→ 阶段二（一体机到位，部署 hub 中枢服务 M3/M4，不再部署 new-api）→ 阶段三（按需增强）。代码中的 `TODO(S1-2)` 等标记对应各阶段任务号。
+分阶段开发：阶段一（不依赖新硬件，桌面端直连模式）→ 阶段二（一体机到位，部署 hub 中枢服务，不再部署 new-api；**已冻结 2026-10-02**：M3/M4 取消，hub 骨架保留冻结）→ 阶段三（按需增强）。代码中的 `TODO(S1-2)` 等标记对应各阶段任务号。
 
 ## 仓库结构
 
@@ -26,10 +26,11 @@ apps/
                           #   stores/（Pinia）、views/、components/、lib/
     src-tauri/            # Rust 壳：src/commands/（Tauri commands 薄壳）、
                           #   sidecar.rs（mihomo 进程管理，已落地）、binaries/（sidecar 二进制）
-  hub/                    # 中枢服务 toogl-hub（axum + tokio，跑在一体机 Linux 上，无界面，阶段二）
+  hub/                    # 中枢服务 toogl-hub（axum + tokio，跑在一体机 Linux 上，无界面，阶段二已冻结）
 crates/
   core/                   # 共享核心 toogl-core：models / adapters（kimi/deepseek/mimo 配额适配器）/
                           #   datasource / keystore / mihomo / kimicode / mimocode / omp（三个日志 parser）/
+                          #   logs/（kimicode/omp 共用的文件游标扫描入库骨架）/
                           #   usage/（编排层：query 聚合查询、quota 配额刷新、account 账户配置）/
                           #   sysproxy.rs（系统代理读写与现场备份还原）、proxy_setting.rs（代理设置持久化）、
                           #   db.rs（SQLite 连接与迁移执行）
@@ -100,6 +101,7 @@ cargo test -p toogl-core -- --ignored keyring_real_roundtrip   # 真实系统钥
 
 - 已就绪：monorepo 脚手架与 CI、凭据读写收进 `platform_account_set`（keyring 显式 windows-native，SERVICE_NAME 统一在 `keystore::KEYRING_SERVICE_NAME`）、Rust 侧统一 schema 迁移（`crates/core/migrations/`，事件/日聚合/游标表带 `platform`+`cli` 维度，另有 quota_snapshot / platform_account / proxy_setting，由 `db::migrate` 幂等执行；tauri-plugin-sql 已移除）、三个日志 parser（`crates/core/kimicode` wire.jsonl、`mimocode` mimocode.db 只读、`omp` JSONL，统一归一化为 UsageEvent，共享增量游标 + 按日预聚合框架；单文件容错 + size/mtime 变化触发幂等重扫；扫描互斥锁防并发双计）、`crates/core/usage/` 编排层（聚合查询 query / 配额刷新 quota / 账户配置 account）、三个配额适配器（`adapters/kimi.rs` 余额 + 非官方 coding usages best-effort，`deepseek.rs` 官方 /user/balance，`mimo.rs` 手录总额 + 本地日志推算，纯本地不发请求；wiremock 覆盖 401/超时/字段缺失）、泛化 Tauri commands（`commands/usage.rs`，统一返回结构化 `CommandError`，单平台失败不影响其他平台）、前端多平台用量页（`views/Usage.vue` 平台 Tab + QuotaCard 降级态；`stores/usage.ts`）、Dashboard 多平台摘要卡、设置页平台分区、ts-rs bindings 链路（含 index.ts 完整性测试）。
 - M5 魔法工具（S1-3）：mihomo v1.19.32 sidecar（`src-tauri/binaries/` 固定版本，sha256 与官方 release digest 一致；externalBin + tauri-plugin-shell；setup 拉起 / `RunEvent::Exit` 回收；external-controller 仅回环、端口顺延 9090-9100 持久化到 proxy_setting；首跑生成仅回环初始配置模板）、`crates/core/mihomo/client.rs` RESTful 客户端（代理组/切节点/并发测速/模式切换/存活探测）、`crates/core/sysproxy.rs` 系统代理（RegistryIo/ProxyStateStore seam，开启备份现场/关闭无损还原/崩溃残留自检恢复，测试全 mock 不碰真实注册表）、proxy 命令六条（`commands/proxy.rs`：`proxy_status` 字段级降级、`select_proxy`、`test_delay`、`set_system_proxy`、`switch_rule_mode`、`recover_system_proxy`；退出钩子先恢复系统代理再杀 sidecar）、前端 `views/Proxy.vue` + `stores/proxy.ts`（4s 轮询、乐观更新失败回滚、残留提示恢复流）。
-- 骨架待落地：节点导入（M5-07 分享链接/订阅，S1-3 拆出的后续任务）、HubSource（S2-2）、hub API /usage /config /control（S2-1，现仅 /api/v1/health）。
+- 骨架待落地：节点导入（M5-07 分享链接/订阅，S1-3 拆出的后续任务）、HubSource（S2-2）、hub API /usage /config /control（S2-1，现仅 /api/v1/health）。（S2 项随阶段二冻结暂停）
+- **2026-10-02 决策**：M3 服务器 / M4 NAS 两模块取消（用户近期无时间维护一体机，编号保留不复用），阶段二（一体机/hub）随之冻结；`apps/hub` 骨架保留冻结，仅 `/api/v1/health`。
 - 已知占位：用量估值单价表全 0（estimated_cost 恒 0，待官方价格确认，将迁移为 M6 可配置项）；MiMo 配额无公开 API，只能手录总额 + 本地日志推算消耗。
 - 人工验收待补：S1-4 三项（DeepSeek 真实 key、真实 mimocode.db、Kimi `/coding/v1/usages` 格式为推测）；S1-3 真机联调（sidecar 拉起无孤儿进程、切节点出口 IP 变化、系统代理注册表实测、强杀后残留自检恢复）。

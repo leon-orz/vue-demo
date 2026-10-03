@@ -1,19 +1,14 @@
 //! 日志扫描器：遍历 sessions 目录下的会话 jsonl，产出归一化事件。
-//! 注意：不是真正的"增量续读"——游标（offset + mtime）只用于变化检测，size/mtime
-//! 任一变化即从头全量重扫，幂等性由 store 层整批重建（先删该文件旧事件再写入）保证。
-//! 游标持久化由 store 层负责，本模块只做"文件系统 + 游标输入 → 事件 + 新游标"的纯转换。
-//!
-//! 复用 kimicode::scanner 的游标/结果类型与截断检测模式（size 或 mtime 变化即从头重扫，
-//! 重扫幂等由 store 层整批重建保证）；差异在文件收集（*.jsonl 按扩展名递归匹配，排除
-//! 会话子目录里的 .bash.log）与会话元信息来源（文件内 type=="session" 行，而非旁路
-//! state.json——session 行实测固定出现在消息行之前，从头重扫时天然先读到）。
+//! 公共骨架（游标/结果类型、截断检测、逐文件容错、完整行读取循环）收在
+//! crate::logs::scanner；本模块只保留平台相关部分：*.jsonl 收集规则（排除会话子目录里
+//! 的 .bash.log 等附件）、会话元信息提取（文件内 type=="session" 行，而非旁路
+//! state.json——session 行实测固定出现在消息行之前，从头重扫时天然先读到）、
+//! 行解析回调（platform="omp"、cli="omp"）。
 
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
-pub use crate::kimicode::scanner::{FileCursor, ScanOutput, ScanStats, ScannedFile};
+pub use crate::logs::scanner::{FileCursor, ScanOutput, ScanStats, ScannedFile};
 
 use super::parser::{self, ParsedUsage};
 use super::OMP_CLI;
@@ -63,40 +58,24 @@ fn project_from_cwd(cwd: &str) -> String {
         .to_string()
 }
 
-/// 从头读取单个文件。只处理以换行符结尾的完整行（写入半途的尾行不消费，下次重扫时覆盖）。
-/// 恒定从头读：本扫描器不做 offset 续读，任何变化都由 scan() 触发全量重扫。
-/// 逐行维护会话元信息（session 行先于消息行出现），事件归属读到时的最新会话上下文。
+/// 从头读取单个文件并解析用量行。行读取循环与不完整尾行处理在
+/// crate::logs::scanner::read_lines；逐行维护会话元信息（session 行先于消息行出现），
+/// 事件归属读到时的最新会话上下文。
 fn read_incremental(path: &Path, stats: &mut ScanStats) -> std::io::Result<(u64, Vec<UsageEvent>)> {
-    let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
-    let mut events = Vec::new();
-    let mut consumed = 0u64;
-    let mut line = String::new();
     // 会话上下文：session 行出现前用文件名/unknown 兜底
     let mut session_id: Option<String> = None;
     let mut project: Option<String> = None;
-    loop {
-        line.clear();
-        let n = reader.read_line(&mut line)?;
-        if n == 0 {
-            break; // EOF
-        }
-        if !line.ends_with('\n') {
-            // 不完整尾行：不前进偏移，留给下次重扫
-            stats.partial_lines_skipped += 1;
-            break;
-        }
-        consumed += n as u64;
-        if let Some(meta) = parser::parse_session_meta(&line) {
+    crate::logs::scanner::read_lines(path, stats, |line, stats, events| {
+        if let Some(meta) = parser::parse_session_meta(line) {
             if meta.id.is_some() {
                 session_id = meta.id;
             }
             if let Some(cwd) = meta.cwd {
                 project = Some(project_from_cwd(&cwd));
             }
-            continue;
+            return;
         }
-        match parser::parse_line(&line) {
+        match parser::parse_line(line) {
             Ok(Some(ParsedUsage {
                 ts,
                 model,
@@ -132,76 +111,19 @@ fn read_incremental(path: &Path, stats: &mut ScanStats) -> std::io::Result<(u64,
             Ok(None) => {}
             Err(_) => stats.bad_lines += 1,
         }
-    }
-    Ok((consumed, events))
+    })
 }
 
 /// 扫描 sessions 根目录。`cursors` 为 path → 游标（已读偏移 + mtime）的表（来自 store 层）。
-/// 单文件容错：任一文件取元数据或读取失败只计入 `stats.files_failed` 并跳过
-/// （不产出 ScannedFile，游标不更新，下次扫描自然重试），不中断整体扫描。
+/// 主循环与单文件容错在 crate::logs::scanner::scan。
 pub fn scan(root: &Path, cursors: &HashMap<PathBuf, FileCursor>) -> std::io::Result<ScanOutput> {
-    let mut paths = Vec::new();
-    collect_session_files(root, &mut paths)?;
-    paths.sort();
-
-    let mut stats = ScanStats::default();
-    let mut files = Vec::new();
-    for path in paths {
-        stats.files_found += 1;
-        let meta = match std::fs::metadata(&path) {
-            Ok(m) => m,
-            Err(_) => {
-                stats.files_failed += 1;
-                continue;
-            }
-        };
-        let size = meta.len();
-        let mtime = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
-        let cursor = cursors.get(&path).copied();
-        let old_offset = cursor.map(|c| c.offset).unwrap_or(0);
-        let old_mtime = cursor.map(|c| c.mtime).unwrap_or(0);
-        // 截断检测放宽：大小或 mtime 任一变化都从头重扫（重扫幂等，代价低，
-        // 可覆盖原地重写、内容替换但长度不变等 size < old_offset 抓不到的场景）
-        let truncated =
-            cursor.is_some() && (size != old_offset || (mtime != 0 && mtime != old_mtime));
-        if truncated {
-            stats.files_rescanned += 1;
-        }
-        if cursor.is_some() && !truncated {
-            // 大小与 mtime 均未变化，无增量可读：跳过读取，只更新 last_scanned_at
-            files.push(ScannedFile {
-                path,
-                size,
-                mtime,
-                new_offset: old_offset,
-                truncated: false,
-                events: Vec::new(),
-            });
-            continue;
-        }
-        match read_incremental(&path, &mut stats) {
-            Ok((new_offset, events)) => files.push(ScannedFile {
-                path,
-                size,
-                mtime,
-                new_offset,
-                truncated,
-                events,
-            }),
-            Err(_) => stats.files_failed += 1,
-        }
-    }
-    Ok(ScanOutput { files, stats })
+    crate::logs::scanner::scan(root, cursors, collect_session_files, read_incremental)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::File;
     use std::io::Write;
 
     /// 在临时目录构造一个 omp 会话：{--cwd--}/{ts}_{sessionId}.jsonl

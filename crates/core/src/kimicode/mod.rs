@@ -39,6 +39,16 @@ pub enum KimiError {
     NoHomeDir,
 }
 
+impl From<crate::logs::store::LogError> for KimiError {
+    fn from(e: crate::logs::store::LogError) -> Self {
+        use crate::logs::store::LogError;
+        match e {
+            LogError::Io(e) => KimiError::Io(e),
+            LogError::Db(e) => KimiError::Db(e),
+        }
+    }
+}
+
 impl From<KimiError> for CommandError {
     fn from(e: KimiError) -> Self {
         match e {

@@ -428,4 +428,183 @@ mod tests {
         let err = refresh(&pool, &secrets, Platform::Omp).await.unwrap_err();
         assert_eq!(err.kind, "unavailable");
     }
+
+    // ---- detail_json 前后端契约锁 ----
+    // 前端 apps/desktop/src/stores/usage.ts 的 parseKimi/Mimo/DeepseekQuotaDetail 按固定
+    // 键名解析 detail_json；Rust 改键名不会报错，前端只会静默降级（字段解析为 null）。
+    // 以下测试锁死三个平台 detail_json 的键集合与值类型，改形状必须先改前端。
+
+    /// 断言 JSON 对象的键集合与期望完全一致（多键/少键/改键名都失败）
+    fn assert_json_keys(value: &serde_json::Value, mut expected: Vec<&str>) {
+        let obj = value.as_object().expect("应为 JSON 对象");
+        let mut actual: Vec<&str> = obj.keys().map(String::as_str).collect();
+        actual.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(actual, expected, "detail_json 键集合与前端契约不一致");
+    }
+
+    #[tokio::test]
+    async fn kimi_detail_json_contract_locked() {
+        let (_tmp, pool) = temp_pool().await;
+        let secrets = MemoryStore::default();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/users/me/balance"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(balance_body()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/coding/v1/usages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(usages_body()))
+            .mount(&server)
+            .await;
+        setup_kimi(&pool, &secrets, &server.uri()).await;
+
+        let snap = refresh_with(&pool, &secrets, Platform::Kimi, Some(&server.uri()))
+            .await
+            .unwrap();
+        let detail: serde_json::Value =
+            serde_json::from_str(snap.detail_json.as_deref().unwrap()).unwrap();
+        assert_json_keys(&detail, vec!["sources"]);
+        let sources = &detail["sources"];
+        assert_json_keys(
+            sources,
+            vec!["balance", "coding_usages", "coding_usages_error"],
+        );
+
+        // sources.balance：开放平台按量余额分项（单位元）
+        let balance = &sources["balance"];
+        assert_json_keys(balance, vec!["available", "voucher", "cash", "currency"]);
+        assert!(balance["available"].is_number());
+        assert!(balance["voucher"].is_number());
+        assert!(balance["cash"].is_number());
+        assert!(balance["currency"].is_string());
+
+        // sources.coding_usages：套餐 5h 滚动窗口 + 月度池（字段可空，键名固定）
+        let coding = &sources["coding_usages"];
+        assert_json_keys(
+            coding,
+            vec![
+                "month_total",
+                "month_used",
+                "month_remaining",
+                "window_used_percent",
+                "window_remaining_percent",
+                "window_reset_at",
+            ],
+        );
+        assert!(coding["month_total"].is_number());
+        assert!(coding["month_used"].is_number());
+        assert!(coding["month_remaining"].is_number());
+        assert!(coding["window_used_percent"].is_number());
+        assert!(coding["window_remaining_percent"].is_number());
+        assert!(coding["window_reset_at"].is_string());
+
+        // 成功路径无降级原因
+        assert!(sources["coding_usages_error"].is_null());
+    }
+
+    #[tokio::test]
+    async fn kimi_detail_json_contract_locked_on_coding_failure() {
+        let (_tmp, pool) = temp_pool().await;
+        let secrets = MemoryStore::default();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/users/me/balance"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(balance_body()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/coding/v1/usages"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        setup_kimi(&pool, &secrets, &server.uri()).await;
+
+        let snap = refresh_with(&pool, &secrets, Platform::Kimi, Some(&server.uri()))
+            .await
+            .unwrap();
+        let detail: serde_json::Value =
+            serde_json::from_str(snap.detail_json.as_deref().unwrap()).unwrap();
+        // 降级路径键集合不变：coding_usages 为 null、coding_usages_error 为字符串
+        assert_json_keys(&detail, vec!["sources"]);
+        let sources = &detail["sources"];
+        assert_json_keys(
+            sources,
+            vec!["balance", "coding_usages", "coding_usages_error"],
+        );
+        assert_json_keys(
+            &sources["balance"],
+            vec!["available", "voucher", "cash", "currency"],
+        );
+        assert!(sources["coding_usages"].is_null());
+        assert!(sources["coding_usages_error"].is_string());
+    }
+
+    #[tokio::test]
+    async fn mimo_detail_json_contract_locked() {
+        let (_tmp, pool) = temp_pool().await;
+        let secrets = MemoryStore::default();
+        let mut input = input(Platform::Mimo, None);
+        input.quota_total = Some(100.0);
+        input.quota_cycle = Some("monthly".to_string());
+        set_row(&pool, Platform::Mimo, &input).await.unwrap();
+
+        let snap = refresh(&pool, &secrets, Platform::Mimo).await.unwrap();
+        let detail: serde_json::Value =
+            serde_json::from_str(snap.detail_json.as_deref().unwrap()).unwrap();
+        assert_json_keys(
+            &detail,
+            vec!["quota_cycle", "period_start", "progress", "unit"],
+        );
+        assert_eq!(detail["quota_cycle"], "monthly");
+        assert!(detail["period_start"].is_string());
+        assert!(detail["progress"].is_number());
+        assert_eq!(detail["unit"], "credit");
+    }
+
+    #[tokio::test]
+    async fn deepseek_detail_json_contract_locked() {
+        let (_tmp, pool) = temp_pool().await;
+        let secrets = MemoryStore::default();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user/balance"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "is_available": true,
+                "balance_infos": [{
+                    "currency": "CNY",
+                    "total_balance": "110.00",
+                    "granted_balance": "10.00",
+                    "topped_up_balance": "100.00"
+                }]
+            })))
+            .mount(&server)
+            .await;
+        set_row(
+            &pool,
+            Platform::Deepseek,
+            &input(Platform::Deepseek, Some(server.uri())),
+        )
+        .await
+        .unwrap();
+        secrets
+            .set(default_credential_ref(Platform::Deepseek).unwrap(), "sk-ds")
+            .unwrap();
+
+        let snap = refresh(&pool, &secrets, Platform::Deepseek).await.unwrap();
+        let detail: serde_json::Value =
+            serde_json::from_str(snap.detail_json.as_deref().unwrap()).unwrap();
+        assert_json_keys(&detail, vec!["is_available", "balances"]);
+        assert!(detail["is_available"].is_boolean());
+        // balances 为币种分项数组，元素键名固定（granted/topped_up 可空）
+        let items = detail["balances"].as_array().expect("balances 应为数组");
+        assert!(!items.is_empty());
+        let item = &items[0];
+        assert_json_keys(item, vec!["currency", "total", "granted", "topped_up"]);
+        assert!(item["currency"].is_string());
+        assert!(item["total"].is_number());
+        assert!(item["granted"].is_number());
+        assert!(item["topped_up"].is_number());
+    }
 }
