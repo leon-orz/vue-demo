@@ -34,8 +34,8 @@ export const router = createRouter({
     {
       path: '/proxy',
       name: 'proxy',
-      component: () => import('@/views/PlaceholderView.vue'),
-      meta: { title: '魔法工具', milestone: 'S1-3 交付' },
+      component: () => import('@/views/Proxy.vue'),
+      meta: { title: '魔法工具' },
     },
     {
       path: '/settings',

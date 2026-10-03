@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ArrowRight, WandSparkles } from '@lucide/vue'
-import { onMounted } from 'vue'
+import { computed, onMounted } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 
 import CacheHitBadge from '@/components/CacheHitBadge.vue'
@@ -8,6 +8,7 @@ import LoadErrorBanner from '@/components/LoadErrorBanner.vue'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { formatMoney, formatTokens, inputTotal } from '@/lib/format'
+import { RULE_MODE_LABELS, useProxyStore } from '@/stores/proxy'
 import {
   parseMimoQuotaDetail,
   PLATFORM_LABELS,
@@ -19,7 +20,16 @@ import type { Platform } from '@toogl/core-types'
 
 const usage = useUsageStore()
 const settings = useSettingsStore()
+const proxy = useProxyStore()
 const router = useRouter()
+
+/** 代理卡当前选中节点摘要：第一个 selector 组的 now；兜底用记住的选择 */
+const proxyCurrentNode = computed(() => {
+  const selector = proxy.status?.proxies?.groups.find((g) => g.group_type === 'selector')
+  if (selector) return `${selector.name} · ${selector.now}`
+  const remembered = proxy.status?.remembered_selection
+  return remembered ? `${remembered.group} · ${remembered.node}` : ''
+})
 
 /** 各平台配额/余额的一行摘要；未配置/不可达时返回引导文案而非报错 */
 function quotaSummary(platform: Platform): string {
@@ -50,8 +60,11 @@ function needsSetup(platform: Platform): boolean {
   return !usage.accounts[platform]?.has_credential
 }
 
-// Dashboard 只读各模块缓存数据；用量 store 未初始化时补一次（后台扫描同用量页）
-onMounted(() => usage.init(settings.kimiSessionsDir || undefined))
+// Dashboard 只读各模块缓存数据；用量 store 未初始化时补一次（后台扫描同用量页），代理状态拉一次快照
+onMounted(() => {
+  void usage.init(settings.kimiSessionsDir || undefined)
+  void proxy.refresh()
+})
 </script>
 
 <template>
@@ -118,17 +131,41 @@ onMounted(() => usage.init(settings.kimiSessionsDir || undefined))
         </Card>
       </RouterLink>
 
-      <!-- DB-01：代理状态占位（S1-3 交付） -->
-      <Card class="h-full opacity-70">
-        <CardHeader class="flex-row items-center justify-between space-y-0 pb-2">
-          <CardTitle class="text-base">代理状态</CardTitle>
-          <WandSparkles class="size-4 text-muted-foreground" />
-        </CardHeader>
-        <CardContent class="flex flex-col gap-2">
-          <p class="text-sm text-muted-foreground">魔法工具模块尚未交付。</p>
-          <Badge variant="outline" class="w-fit">S1-3 交付</Badge>
-        </CardContent>
-      </Card>
+      <!-- DB-01：代理状态摘要（当前模式 + 选中节点 + 系统代理），不可用显示占位不报错 -->
+      <RouterLink to="/proxy" class="block transition-transform hover:-translate-y-0.5">
+        <Card class="h-full">
+          <CardHeader class="flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle class="text-base">代理状态</CardTitle>
+            <WandSparkles class="size-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent class="flex flex-col gap-2">
+            <template v-if="proxy.status && proxy.status.sidecar_alive">
+              <div class="flex items-center gap-2">
+                <Badge variant="secondary">
+                  {{
+                    proxy.status.rule_mode ? RULE_MODE_LABELS[proxy.status.rule_mode] : '未知模式'
+                  }}
+                </Badge>
+                <Badge :variant="proxy.status.system_proxy?.enabled ? 'default' : 'outline'">
+                  系统代理{{ proxy.status.system_proxy?.enabled ? '开' : '关' }}
+                </Badge>
+              </div>
+              <p class="truncate text-sm text-muted-foreground">
+                {{ proxyCurrentNode || '未选择节点' }}
+              </p>
+            </template>
+            <template v-else>
+              <p class="text-sm text-muted-foreground">
+                {{
+                  proxy.status?.startup_error
+                    ? 'sidecar 启动失败，详见魔法工具页'
+                    : 'mihomo sidecar 未运行'
+                }}
+              </p>
+            </template>
+          </CardContent>
+        </Card>
+      </RouterLink>
     </section>
   </div>
 </template>

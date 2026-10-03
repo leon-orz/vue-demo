@@ -1,4 +1,5 @@
 /** 数字与时间的展示格式化（纯函数，供单测直接覆盖） */
+import type { DelayStatus } from '@toogl/core-types'
 
 /** token 数量：>=1 亿用「亿」，>=1 万用「万」，其余原样千分位 */
 export function formatTokens(n: number): string {
@@ -38,4 +39,19 @@ export function inputTotal(t: {
 /** 去掉小数尾部多余的 0（57.0万 → 57万，57.25万 → 57.3万） */
 function trimFixed(v: number): string {
   return v.toFixed(1).replace(/\.0$/, '')
+}
+
+/** 节点延迟展示：未测/超时用文字，已测带毫秒 */
+export function formatDelay(delayMs: number | null, status: DelayStatus): string {
+  if (status === 'untested') return '未测'
+  if (status === 'timeout') return '超时'
+  return delayMs === null ? '—' : `${delayMs} ms`
+}
+
+/** 节点延迟着色（与 CacheHitBadge 同一套语义色）：<200ms 绿，<800ms 黄，其余红；未测/超时灰 */
+export function delayToneClass(delayMs: number | null, status: DelayStatus): string {
+  if (status !== 'delayed' || delayMs === null) return 'text-muted-foreground'
+  if (delayMs < 200) return 'text-green-600 dark:text-green-400'
+  if (delayMs < 800) return 'text-yellow-600 dark:text-yellow-400'
+  return 'text-red-600 dark:text-red-400'
 }

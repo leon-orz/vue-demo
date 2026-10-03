@@ -12,7 +12,7 @@ const navItems = [
   { to: '/usage', label: 'AI 用量', icon: ChartLine, enabled: true },
   { to: '/server', label: '服务器', icon: Server, enabled: false, milestone: '阶段二' },
   { to: '/nas', label: 'NAS', icon: HardDrive, enabled: false, milestone: '阶段二' },
-  { to: '/proxy', label: '魔法工具', icon: WandSparkles, enabled: false, milestone: 'S1-3' },
+  { to: '/proxy', label: '魔法工具', icon: WandSparkles, enabled: true },
   { to: '/settings', label: '设置', icon: Settings, enabled: true },
 ]
 </script>
