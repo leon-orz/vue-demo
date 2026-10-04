@@ -175,7 +175,7 @@ impl LogStore {
         // 本次扫描无新事件且无重扫时跳过日聚合全量重建（结果必然相同）
         if events_added > 0 || has_rescan {
             // 幂等重算本平台日聚合（只删重建 platform+cli 本行组，不动其他平台数据；
-            // 个人量级全量重算足够快，页面查询只打聚合表）
+            // 个人量级全量重算足够快，页面查询只打聚合表；request_count 为该桶事件行数）
             sqlx::query("DELETE FROM usage_daily WHERE platform = ? AND cli = ?")
                 .bind(self.platform.as_str())
                 .bind(self.cli)
@@ -183,9 +183,10 @@ impl LogStore {
                 .await?;
             sqlx::query(
                 "INSERT INTO usage_daily (date, platform, cli, project, model,
-                     input_other, output, cache_read, cache_creation)
+                     input_other, output, cache_read, cache_creation, request_count)
                  SELECT date(ts / 1000, 'unixepoch', 'localtime'), platform, cli, project, model,
-                        SUM(input_other), SUM(output), SUM(cache_read), SUM(cache_creation)
+                        SUM(input_other), SUM(output), SUM(cache_read), SUM(cache_creation),
+                        COUNT(*)
                  FROM usage_event
                  WHERE platform = ? AND cli = ?
                  GROUP BY 1, 2, 3, 4, 5",

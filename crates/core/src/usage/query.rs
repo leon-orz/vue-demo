@@ -84,10 +84,11 @@ async fn totals_where(
     range: UsageRange,
 ) -> Result<UsageTotals, sqlx::Error> {
     let (source, marker) = range_source(range);
-    let row: (i64, i64, i64, i64) = if source == Source::Event {
+    // 请求数：事件表实时聚合用 COUNT(*)，预聚合表用 request_count 列（由扫描重算/0007 回填维护）
+    let row: (i64, i64, i64, i64, i64) = if source == Source::Event {
         let sql = format!(
             "SELECT COALESCE(SUM(input_other),0), COALESCE(SUM(output),0),
-                    COALESCE(SUM(cache_read),0), COALESCE(SUM(cache_creation),0)
+                    COALESCE(SUM(cache_read),0), COALESCE(SUM(cache_creation),0), COUNT(*)
              FROM usage_event WHERE ts >= ?{}",
             platform_clause(platform)
         );
@@ -100,7 +101,8 @@ async fn totals_where(
         let start = range_start_date(marker);
         let sql = format!(
             "SELECT COALESCE(SUM(input_other),0), COALESCE(SUM(output),0),
-                    COALESCE(SUM(cache_read),0), COALESCE(SUM(cache_creation),0)
+                    COALESCE(SUM(cache_read),0), COALESCE(SUM(cache_creation),0),
+                    COALESCE(SUM(request_count),0)
              FROM usage_daily WHERE date >= ?{}",
             platform_clause(platform)
         );
@@ -111,7 +113,7 @@ async fn totals_where(
         q.fetch_one(pool).await?
     };
     Ok(with_estimated_cost(UsageTotals::new(
-        row.0, row.1, row.2, row.3,
+        row.0, row.1, row.2, row.3, row.4,
     )))
 }
 
@@ -136,10 +138,10 @@ async fn group_by(
 ) -> Result<Vec<UsageGroup>, sqlx::Error> {
     let group_col = group.column();
     let (source, marker) = range_source(range);
-    let rows: Vec<(String, i64, i64, i64, i64)> = if source == Source::Event {
+    let rows: Vec<(String, i64, i64, i64, i64, i64)> = if source == Source::Event {
         let sql = format!(
             "SELECT {group_col}, SUM(input_other), SUM(output),
-                    SUM(cache_read), SUM(cache_creation)
+                    SUM(cache_read), SUM(cache_creation), COUNT(*)
              FROM usage_event WHERE ts >= ?{}
              GROUP BY {group_col} ORDER BY 2 DESC",
             platform_clause(platform)
@@ -153,7 +155,7 @@ async fn group_by(
         let start = range_start_date(marker);
         let sql = format!(
             "SELECT {group_col}, SUM(input_other), SUM(output),
-                    SUM(cache_read), SUM(cache_creation)
+                    SUM(cache_read), SUM(cache_creation), SUM(request_count)
              FROM usage_daily WHERE date >= ?{}
              GROUP BY {group_col} ORDER BY 2 DESC",
             platform_clause(platform)
@@ -166,9 +168,9 @@ async fn group_by(
     };
     Ok(rows
         .into_iter()
-        .map(|(key, a, b, c, d)| UsageGroup {
+        .map(|(key, a, b, c, d, n)| UsageGroup {
             key,
-            totals: with_estimated_cost(UsageTotals::new(a, b, c, d)),
+            totals: with_estimated_cost(UsageTotals::new(a, b, c, d, n)),
         })
         .collect())
 }
@@ -198,7 +200,7 @@ pub async fn usage_series(
     platform: Option<Platform>,
     range: UsageRange,
 ) -> Result<UsageSeries, sqlx::Error> {
-    let rows: Vec<(String, i64, i64, i64, i64)> = match range {
+    let rows: Vec<(String, i64, i64, i64, i64, i64)> = match range {
         UsageRange::Day | UsageRange::Last5Hours => {
             let marker = match range {
                 UsageRange::Day => local_midnight_ms(),
@@ -207,7 +209,8 @@ pub async fn usage_series(
             };
             let sql = format!(
                 "SELECT strftime('%H:00', ts / 1000, 'unixepoch', 'localtime') AS bucket,
-                        SUM(input_other), SUM(output), SUM(cache_read), SUM(cache_creation)
+                        SUM(input_other), SUM(output), SUM(cache_read), SUM(cache_creation),
+                        COUNT(*)
                  FROM usage_event WHERE ts >= ?{}
                  GROUP BY bucket ORDER BY bucket",
                 platform_clause(platform)
@@ -223,7 +226,8 @@ pub async fn usage_series(
             let start = range_start_date(kind);
             let sql = format!(
                 "SELECT date AS bucket,
-                        SUM(input_other), SUM(output), SUM(cache_read), SUM(cache_creation)
+                        SUM(input_other), SUM(output), SUM(cache_read), SUM(cache_creation),
+                        SUM(request_count)
                  FROM usage_daily WHERE date >= ?{}
                  GROUP BY date ORDER BY date",
                 platform_clause(platform)
@@ -239,9 +243,9 @@ pub async fn usage_series(
         range,
         points: rows
             .into_iter()
-            .map(|(bucket, a, b, c, d)| UsagePoint {
+            .map(|(bucket, a, b, c, d, n)| UsagePoint {
                 bucket,
-                totals: with_estimated_cost(UsageTotals::new(a, b, c, d)),
+                totals: with_estimated_cost(UsageTotals::new(a, b, c, d, n)),
             })
             .collect(),
     })
@@ -305,7 +309,7 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
-        // 重建本平台日聚合
+        // 重建本平台日聚合（与 logs/store.rs 的重算口径一致，含 request_count = 事件行数）
         sqlx::query("DELETE FROM usage_daily WHERE platform = ? AND cli = ?")
             .bind(platform)
             .bind(cli)
@@ -314,9 +318,9 @@ mod tests {
             .unwrap();
         sqlx::query(
             "INSERT INTO usage_daily (date, platform, cli, project, model,
-                 input_other, output, cache_read, cache_creation)
+                 input_other, output, cache_read, cache_creation, request_count)
              SELECT date(ts / 1000, 'unixepoch', 'localtime'), platform, cli, project, model,
-                    SUM(input_other), SUM(output), SUM(cache_read), SUM(cache_creation)
+                    SUM(input_other), SUM(output), SUM(cache_read), SUM(cache_creation), COUNT(*)
              FROM usage_event WHERE platform = ? AND cli = ?
              GROUP BY 1, 2, 3, 4, 5",
         )
@@ -338,12 +342,15 @@ mod tests {
 
         let all = summary(&pool, None, UsageRange::Day).await.unwrap();
         assert_eq!(all.totals.input_other, 300);
+        // 请求数 = 事件条数（每条事件对应一次 turn）
+        assert_eq!(all.totals.request_count, 2);
 
         // 单平台隔离
         let kimi = summary(&pool, Some(Platform::Kimi), UsageRange::Day)
             .await
             .unwrap();
         assert_eq!(kimi.totals.input_other, 100);
+        assert_eq!(kimi.totals.request_count, 1);
     }
 
     #[tokio::test]
@@ -359,16 +366,19 @@ mod tests {
             .unwrap();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].totals.input_other, 400);
+        assert_eq!(groups[0].totals.request_count, 2);
         let kimi_only = usage_by_project(&pool, Some(Platform::Kimi), UsageRange::Day)
             .await
             .unwrap();
         assert_eq!(kimi_only[0].totals.input_other, 100);
+        assert_eq!(kimi_only[0].totals.request_count, 1);
 
         // Last5Hours 走事件表，平台过滤同样生效
         let last5 = summary(&pool, Some(Platform::Kimi), UsageRange::Last5Hours)
             .await
             .unwrap();
         assert_eq!(last5.totals.input_other, 100);
+        assert_eq!(last5.totals.request_count, 1);
 
         let series = usage_series(&pool, None, UsageRange::Day).await.unwrap();
         assert_eq!(
@@ -378,6 +388,15 @@ mod tests {
                 .map(|p| p.totals.input_other)
                 .sum::<i64>(),
             400
+        );
+        // 趋势桶的请求数同样来自 COUNT(*)/SUM(request_count)
+        assert_eq!(
+            series
+                .points
+                .iter()
+                .map(|p| p.totals.request_count)
+                .sum::<i64>(),
+            2
         );
         let series_kimi = usage_series(&pool, Some(Platform::Kimi), UsageRange::Month)
             .await

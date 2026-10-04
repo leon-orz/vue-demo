@@ -67,7 +67,7 @@ onMounted(() => usage.init(settings.kimiSessionsDir || undefined))
     />
 
     <!-- 概览卡片（Kimi Code 单平台，2026-10-02 决策后其他平台已砍） -->
-    <section class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+    <section class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
       <Card>
         <CardHeader class="pb-2">
           <CardTitle class="text-sm font-medium text-muted-foreground">今日 Token</CardTitle>
@@ -85,6 +85,21 @@ onMounted(() => usage.init(settings.kimiSessionsDir || undefined))
               {{ usage.todaySummary ? formatTokens(usage.todaySummary.totals.output) : '—' }}
             </span>
           </div>
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader class="pb-2">
+          <CardTitle class="text-sm font-medium text-muted-foreground">今日请求数</CardTitle>
+        </CardHeader>
+        <CardContent class="flex flex-col gap-1">
+          <span class="text-xl font-bold">
+            {{ usage.todaySummary ? usage.todaySummary.totals.request_count : '—' }}
+          </span>
+          <p class="text-xs text-muted-foreground">
+            最近 5 小时
+            {{ usage.last5Summary ? usage.last5Summary.totals.request_count : '—' }} 次 · 每条 turn
+            计一次
+          </p>
         </CardContent>
       </Card>
       <Card>

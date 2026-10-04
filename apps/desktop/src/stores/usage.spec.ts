@@ -34,6 +34,7 @@ function summaryOf(range: UsageRange, input: number): UsageSummary {
       output: 10,
       cache_read: 900,
       cache_creation: 0,
+      request_count: 7,
       cache_hit_rate: 0.9,
       estimated_cost: 0,
     },
@@ -83,6 +84,9 @@ describe('usage store 聚合加载', () => {
     await store.init('D:/logs')
     // init 返回时缓存数据已就位（默认过滤为 kimi 单平台）
     expect(store.todaySummary?.totals.input_other).toBe(100)
+    // 请求数随 UsageSummary 透传（概览「今日请求数」卡消费）
+    expect(store.todaySummary?.totals.request_count).toBe(7)
+    expect(store.last5Summary?.totals.request_count).toBe(7)
     expect(store.monthSummary?.range).toBe('Month')
     // 后台扫描：platform 不传，覆盖目录透传给后端
     await vi.waitFor(() => expect(store.scanning).toBe(false))
@@ -253,6 +257,7 @@ describe('聚合数据 stale-write 竞态（loadAggregates 与 setTrendRange 共
             output: 0,
             cache_read: 0,
             cache_creation: 0,
+            request_count: 0,
             cache_hit_rate: 0,
             estimated_cost: 0,
           },

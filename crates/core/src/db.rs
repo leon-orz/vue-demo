@@ -2,7 +2,8 @@
 //! 约定：
 //! - SQL 文件放在 crates/core/migrations/，命名 NNNN_description.sql，版本号严格递增、只增不改；
 //! - 每个文件按分号切分逐条执行，因此禁止在字符串字面量中使用分号；
-//! - 所有语句必须幂等（IF NOT EXISTS 等），以兼容历史上未经迁移表登记的既有数据库。
+//! - 所有语句必须幂等（IF NOT EXISTS 等），以兼容历史上未经迁移表登记的既有数据库；
+//!   ALTER TABLE ADD COLUMN 无 IF NOT EXISTS，用 Migration.guard_column 列守卫实现幂等。
 
 use std::collections::HashSet;
 
@@ -13,6 +14,9 @@ pub struct Migration {
     pub version: i64,
     pub description: &'static str,
     pub sql: &'static str,
+    /// 列级幂等守卫：Some((表, 列)) 时，若该列已存在则整段 SQL 跳过（仍登记版本号）。
+    /// 用于 ALTER TABLE ADD COLUMN 这类无 IF NOT EXISTS 的语句（SQLite 不支持）。
+    pub guard_column: Option<(&'static str, &'static str)>,
 }
 
 /// 全量迁移列表（新增 migration 时在末尾追加一条）
@@ -21,31 +25,44 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 1,
         description: "create_platform_and_usage_snapshot",
         sql: include_str!("../migrations/0001_init.sql"),
+        guard_column: None,
     },
     Migration {
         version: 2,
         description: "create_kimi_tables",
         sql: include_str!("../migrations/0002_kimi.sql"),
+        guard_column: None,
     },
     Migration {
         version: 3,
         description: "multiplatform_generalization",
         sql: include_str!("../migrations/0003_multiplatform.sql"),
+        guard_column: None,
     },
     Migration {
         version: 4,
         description: "cleanup_legacy_kimi_and_gateway_tables",
         sql: include_str!("../migrations/0004_cleanup_legacy.sql"),
+        guard_column: None,
     },
     Migration {
         version: 5,
         description: "create_proxy_setting",
         sql: include_str!("../migrations/0005_proxy_setting.sql"),
+        guard_column: None,
     },
     Migration {
         version: 6,
         description: "kimi_only_cleanup",
         sql: include_str!("../migrations/0006_kimi_only.sql"),
+        guard_column: None,
+    },
+    Migration {
+        version: 7,
+        description: "usage_daily_request_count",
+        sql: include_str!("../migrations/0007_usage_daily_request_count.sql"),
+        // request_count 已存在（如历史库手工加过列）则整段跳过，保证 ADD COLUMN 幂等
+        guard_column: Some(("usage_daily", "request_count")),
     },
 ];
 
@@ -70,18 +87,39 @@ pub async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         if applied.contains(&m.version) {
             continue;
         }
+        // 列守卫：目标列已存在时整段跳过（仍登记版本号），
+        // 让 ALTER TABLE ADD COLUMN 这类无 IF NOT EXISTS 的语句在重复执行/历史库上幂等
+        if let Some((table, column)) = m.guard_column {
+            if column_exists(pool, table, column).await? {
+                register_migration(pool, m).await?;
+                continue;
+            }
+        }
         for stmt in m.sql.split(';') {
             let stmt = stmt.trim();
             if !stmt.is_empty() {
                 sqlx::query(stmt).execute(pool).await?;
             }
         }
-        sqlx::query("INSERT INTO _toogl_migrations (version, description) VALUES (?, ?)")
-            .bind(m.version)
-            .bind(m.description)
-            .execute(pool)
-            .await?;
+        register_migration(pool, m).await?;
     }
+    Ok(())
+}
+
+/// 用 pragma_table_info 判断列是否已存在（表名/列名只来自 MIGRATIONS 常量，无注入面）
+async fn column_exists(pool: &SqlitePool, table: &str, column: &str) -> Result<bool, sqlx::Error> {
+    let sql = format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?");
+    let (count,): (i64,) = sqlx::query_as(&sql).bind(column).fetch_one(pool).await?;
+    Ok(count > 0)
+}
+
+/// 登记一条已应用的迁移
+async fn register_migration(pool: &SqlitePool, m: &Migration) -> Result<(), sqlx::Error> {
+    sqlx::query("INSERT INTO _toogl_migrations (version, description) VALUES (?, ?)")
+        .bind(m.version)
+        .bind(m.description)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -371,6 +409,88 @@ mod tests {
             .unwrap();
             assert_eq!((total, kimi), (1, 1), "表 {table} 应只剩 kimi 一行");
         }
+    }
+
+    /// 0007：usage_daily 增加 request_count 列并按事件表回填；列守卫保证重放幂等
+    #[tokio::test]
+    async fn migration_0007_adds_request_count_and_backfills() {
+        let (_tmp, pool) = temp_pool().await;
+        // 模拟 0006 时代的既有库：应用 0001~0006 并登记（0007 未应用，usage_daily 无 request_count）
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS _toogl_migrations (
+                version INTEGER PRIMARY KEY,
+                description TEXT NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for m in &MIGRATIONS[..6] {
+            apply_sql(&pool, m.sql).await;
+            sqlx::query("INSERT INTO _toogl_migrations (version, description) VALUES (?, ?)")
+                .bind(m.version)
+                .bind(m.description)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        // 造数：两条事件（同日同项目同模型）+ 一条对应的日聚合（缺 request_count）
+        sqlx::query(
+            "INSERT INTO log_file (platform, path, offset, size, mtime, last_scanned_at)
+             VALUES ('kimi', 'k.log', 0, 0, 0, '2026-01-01T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO usage_event
+                 (platform, cli, log_file_id, ts, session_id, project, model,
+                  input_other, output, cache_read, cache_creation, cost)
+             VALUES ('kimi', 'kimi-code', 1, 1000, 's1', 'app', 'm1', 10, 1, 0, 0, NULL),
+                    ('kimi', 'kimi-code', 1, 2000, 's1', 'app', 'm1', 20, 2, 0, 0, NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO usage_daily
+                 (date, platform, cli, project, model, input_other, output, cache_read, cache_creation)
+             VALUES ('1970-01-01', 'kimi', 'kimi-code', 'app', 'm1', 30, 3, 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        migrate(&pool).await.unwrap();
+
+        // 列已存在，回填后 request_count = 事件行数
+        let (input, request_count): (i64, i64) =
+            sqlx::query_as("SELECT input_other, request_count FROM usage_daily")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!((input, request_count), (30, 2));
+
+        // 重放幂等：删除登记记录再 migrate，列守卫跳过 ALTER，数据不变
+        sqlx::query("DELETE FROM _toogl_migrations WHERE version = 7")
+            .execute(&pool)
+            .await
+            .unwrap();
+        migrate(&pool).await.unwrap();
+        let (count, total): (i64, i64) =
+            sqlx::query_as("SELECT COUNT(*), SUM(request_count) FROM usage_daily")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!((count, total), (1, 2));
+        let (registered,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM _toogl_migrations WHERE version = 7")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(registered, 1);
     }
 
     /// 0004 收尾：kimi_account 配置迁入 platform_account（credential_ref 保留，

@@ -67,7 +67,8 @@ pub enum UsageRange {
     Last5Hours,
 }
 
-/// 四类 token 的聚合结果 + 缓存命中率 + 估值金额。
+/// 四类 token 的聚合结果 + 请求数（事件计数）+ 缓存命中率 + 估值金额。
+/// request_count 为聚合范围内 usage_event 的行数（每条事件对应一次 turn 的用量记录）。
 /// 缓存命中率 = cache_read / (input_other + cache_read + cache_creation)，分母为 0 时为 null。
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../packages/core-types/bindings/")]
@@ -81,6 +82,9 @@ pub struct UsageTotals {
     pub cache_read: i64,
     #[ts(type = "number")]
     pub cache_creation: i64,
+    /// 请求/turn 数（聚合范围内的事件条数）
+    #[ts(type = "number")]
+    pub request_count: i64,
     pub cache_hit_rate: Option<f64>,
     /// 按内置静态单价表估算的金额（元）。由查询层填充；单价未定，当前恒为 0（见 kimicode::pricing 的 TODO）
     pub estimated_cost: f64,
@@ -89,7 +93,13 @@ pub struct UsageTotals {
 impl UsageTotals {
     /// 只负责聚合命中率；estimated_cost 由查询层（usage::query）按单价表填充，
     /// 数据层不反向依赖业务层。
-    pub fn new(input_other: i64, output: i64, cache_read: i64, cache_creation: i64) -> Self {
+    pub fn new(
+        input_other: i64,
+        output: i64,
+        cache_read: i64,
+        cache_creation: i64,
+        request_count: i64,
+    ) -> Self {
         let input_total = input_other + cache_read + cache_creation;
         let cache_hit_rate = if input_total > 0 {
             Some(cache_read as f64 / input_total as f64)
@@ -101,6 +111,7 @@ impl UsageTotals {
             output,
             cache_read,
             cache_creation,
+            request_count,
             cache_hit_rate,
             estimated_cost: 0.0,
         }
@@ -310,14 +321,15 @@ mod tests {
 
     #[test]
     fn cache_hit_rate_null_when_no_input() {
-        let t = UsageTotals::new(0, 100, 0, 0);
+        let t = UsageTotals::new(0, 100, 0, 0, 3);
         assert_eq!(t.cache_hit_rate, None);
+        assert_eq!(t.request_count, 3);
     }
 
     #[test]
     fn cache_hit_rate_formula() {
         // 命中率只算输入侧：cache_read / (input_other + cache_read + cache_creation)
-        let t = UsageTotals::new(30, 999, 60, 10);
+        let t = UsageTotals::new(30, 999, 60, 10, 1);
         assert_eq!(t.cache_hit_rate, Some(0.6));
     }
 }
