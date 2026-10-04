@@ -63,7 +63,7 @@ pub fn parse_nodes_text(text: &str) -> Result<ParsedNodes, SubscriptionError> {
 }
 
 /// 形态 1：整体 YAML 解析成功且顶层是含 `proxies` 序列的 Mapping → 逐条校验提取。
-/// 不满足任一条件返回 None（交給后续形态；如纯文本链接列表会被 YAML 折叠成标量而非 Mapping）。
+/// 不满足任一条件返回 None（交给后续形态；如纯文本链接列表会被 YAML 折叠成标量而非 Mapping）。
 fn try_clash_yaml(text: &str) -> Option<ParsedNodes> {
     let value: Value = serde_yaml::from_str(text).ok()?;
     let proxies = value

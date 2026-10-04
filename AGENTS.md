@@ -73,7 +73,7 @@ cargo test -p toogl-core -- --ignored keyring_real_roundtrip   # 真实系统钥
 
 - **注释与文档用中文**；提交信息用英文 Conventional Commits，scope 用模块小写名（usage/server/nas/proxy/settings/hub/core）。
 - **Rust**：rustfmt（4 空格缩进，见 `.editorconfig`）+ clippy，CI 中 `-D warnings`。错误类型用 thiserror；内部 trait 允许 `async fn`（已 `#[allow(async_fn_in_trait)]`）。
-- **TS/Vue**：ESLint 管规则、Prettier 管格式，职责分开（`eslint-config-prettier` 收尾）。Prettier：无分号、单引号、printWidth 100、trailing comma all、LF。TS strict 全开 + `noUnusedLocals` / `noUnusedParameters`；有意未使用的变量用下划线前缀（ESLint 约定）。Vue 用 `<script setup>` + Composition API；页面级组件允许单词命名。
+- **TS/Vue**：ESLint 管规则、Prettier 管格式，职责分开（`eslint-config-prettier` 收尾）。Prettier：无分号、单引号、printWidth 100、trailing comma all、LF（换行由 `.gitattributes` 的 `* text=auto eol=lf` 强制，二进制已标注）。TS strict 全开 + `noUnusedLocals` / `noUnusedParameters`；有意未使用的变量用下划线前缀（ESLint 约定）。Vue 用 `<script setup>` + Composition API；页面级组件允许单词命名。
 - **前端路径别名**：`@/` → `apps/desktop/src/`（vite.config.ts 与 tsconfig 均配置）。
 - **类型纪律（重要）**：`packages/core-types/bindings/` **禁止手改**，只由 ts-rs 生成；前端 `invoke` 的参数/返回类型必须来自该包。改 Rust models 后跑 `export_bindings` 测试并提交生成物，CI 用 `git diff --exit-code` 校验。
 - **Tauri commands**：`src-tauri/src/commands/` 只做薄壳调 `toogl_core`，前端在 `src/api/` 写一一对应的 invoke 封装。所有命令统一返回 `Result<T, CommandError>`（`crates/core/src/models/error.rs`，ts-rs 导出）；前端 invoke 抛出的即该 JSON 对象，经 `src/api/errors.ts` 的 `toCommandError` 规整后展示/分支。
@@ -95,7 +95,7 @@ cargo test -p toogl-core -- --ignored keyring_real_roundtrip   # 真实系统钥
 - **敏感 key 存系统钥匙串**：桌面端用 keyring-rs 走 Windows 凭据管理器。**坑：keyring 3 默认不启用平台后端（静默退化为 mock 内存存储），必须显式 `features = ["windows-native"]`**。hub（Linux 无桌面）用同一 `SecretStore` trait，底层退回主密钥加密的文件存储；测试用 `MemoryStore`。
 - 所有设备经 Tailscale 私网互联，hub 不开公网端口（生产监听 Tailscale 网卡，开发期绑回环 `127.0.0.1:7130`）。
 - 系统代理退出残留是体验事故：M5 需启动自检 + 退出钩子双重保障。
-- `tauri.conf.json` 的 CSP 已收紧（2026-10-04）：`default-src/script-src 'self'`、`style-src 'self' 'unsafe-inline'`、`img/font-src` 放行 `data:`、`connect-src` 放行 `ipc:` / `http://ipc.localhost` / dev 的 `localhost:1420`（含 HMR ws）。改动 CSP 后需验证 dev 窗口与生产包均无资源加载报错。
+- `tauri.conf.json` 的 CSP 已收紧（2026-10-04）：`default-src/script-src 'self'`、`style-src 'self' 'unsafe-inline'`、`img/font-src` 放行 `data:`、`connect-src 'self'` 并放行 `ipc:` / `http://ipc.localhost` / dev 的 `localhost:1420`（含 HMR ws）。改动 CSP 后需验证 dev 窗口与生产包均无资源加载报错。
 - mihomo sidecar 只打 Windows 二进制，选官方 release 固定版本（v1.19.32，常量 `sidecar.rs::MIHOMO_EXPECTED_VERSION`）；启动后比对 `client.version()`，不一致仅告警不阻断，换二进制时必须同步该常量。
 
 ## 当前状态

@@ -107,7 +107,8 @@ pub fn ensure_wired(config_path: &Path) -> Result<bool, SubscriptionError> {
     let body = serde_yaml::to_string(&Value::Mapping(doc))
         .map_err(|e| SubscriptionError::Io(format!("config.yaml 序列化失败: {e}")))?;
 
-    // 先备份再写回（接线只发生一次，备份保留用户可回滚的接线前版本）
+    // 先备份再写回：正常流程接线只发生一次，备份即用户可回滚的接线前版本；
+    // 若用户手工拆除接线后再次触发自动接线，旧备份会被当时的内容覆盖
     let backup = config_path.with_extension("yaml.bak");
     std::fs::copy(config_path, &backup)
         .map_err(|e| SubscriptionError::Io(format!("config.yaml 备份失败: {e}")))?;
