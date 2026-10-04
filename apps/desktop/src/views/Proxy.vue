@@ -295,7 +295,7 @@ async function onImportText() {
         <!-- 手动粘贴导入（折叠区）：逐行解析分享链接，坏行不拖垮整体 -->
         <details class="rounded-md border px-4 py-3">
           <summary class="cursor-pointer text-sm font-medium select-none">
-            手动粘贴导入（vmess / vless / ss / trojan 等分享链接，每行一条）
+            手动粘贴导入（vless / ss / trojan / hysteria2 分享链接，每行一条；暂不支持 vmess）
           </summary>
           <div class="mt-3 flex flex-col gap-3">
             <Textarea
