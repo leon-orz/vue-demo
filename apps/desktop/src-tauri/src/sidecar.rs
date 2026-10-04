@@ -42,6 +42,10 @@ pub const MIXED_PORT_START: u16 = 7890;
 pub const MIXED_PORT_END: u16 = 7900;
 /// 拉起后就绪等待上限（轮询 mihomo /version）
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
+/// 打包的 mihomo sidecar 二进制期望版本（对应 src-tauri/binaries/ 下的文件）。
+/// 更换二进制时必须同步修改本常量：拉起后内核版本与之不一致会打告警日志
+/// 并在 proxy_status 暴露 version_mismatch（仅提示，不阻断启动）。
+pub const MIHOMO_EXPECTED_VERSION: &str = "v1.19.32";
 /// 就绪轮询间隔
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// 单次就绪探测上限：alive() 走 reqwest 默认 10s 超时，不封顶会让总上限失控；
@@ -69,6 +73,9 @@ pub struct ProxyCore {
     /// 主动回收标记：shutdown() 置位后再 kill，drain 任务据此区分
     /// 「应用退出主动回收」与「mihomo 意外退出」，前者不打意外退出日志
     killed_by_us: Arc<AtomicBool>,
+    /// 内核版本与打包期望版本（MIHOMO_EXPECTED_VERSION）不一致（拉起时一次性比对；
+    /// 仅提示不阻断，版本读取失败按一致处理）
+    version_mismatch: bool,
 }
 
 impl ProxyCoreState {
@@ -93,6 +100,14 @@ impl ProxyCoreState {
     /// 拉起失败原因（正常态为 None），供命令层/前端展示降级提示
     pub fn startup_error(&self) -> Option<&str> {
         self.inner.as_ref().err().map(String::as_str)
+    }
+
+    /// 内核版本是否与打包期望版本不一致（错误态为 false）
+    pub fn version_mismatch(&self) -> bool {
+        self.inner
+            .as_ref()
+            .map(|core| core.version_mismatch)
+            .unwrap_or(false)
     }
 
     /// 实时存活探测（打 mihomo /version；错误态直接 false）
@@ -232,6 +247,25 @@ async fn start_inner(app: &AppHandle, app_data_dir: &Path) -> Result<ProxyCore, 
         return Err(e);
     }
 
+    // 内核版本与打包期望版本比对：不一致只告警不阻断（版本漂移不该让代理不可用），
+    // 结果记入 ProxyCore 经 proxy_status 暴露给前端；版本读取失败按一致处理
+    let version_mismatch = match client.version().await {
+        Ok(v) => {
+            let mismatch = !version_matches(&v.version, MIHOMO_EXPECTED_VERSION);
+            if mismatch {
+                eprintln!(
+                    "[sidecar] mihomo 内核版本 {} 与打包期望版本 {} 不一致（更换二进制后请同步 MIHOMO_EXPECTED_VERSION）",
+                    v.version, MIHOMO_EXPECTED_VERSION
+                );
+            }
+            mismatch
+        }
+        Err(e) => {
+            eprintln!("[sidecar] mihomo 版本读取失败，跳过版本校验: {e}");
+            false
+        }
+    };
+
     // 后台持续 drain 子进程输出：不读会导致管道缓冲写满后 mihomo 日志阻塞
     let killed_by_us = Arc::new(AtomicBool::new(false));
     let drain_flag = Arc::clone(&killed_by_us);
@@ -274,7 +308,25 @@ async fn start_inner(app: &AppHandle, app_data_dir: &Path) -> Result<ProxyCore, 
         client,
         child: Mutex::new(Some(child)),
         killed_by_us,
+        version_mismatch,
     })
+}
+
+/// 版本串规范化：trim + 去 v/V 前缀（mihomo /version 可能返回 "v1.19.32" 或 "1.19.32"）
+fn normalize_version(s: &str) -> &str {
+    s.trim().trim_start_matches(['v', 'V'])
+}
+
+/// 版本比对：规范化后相等，或带非数字后缀（如构建元信息 "1.19.32-xxx"）视为一致
+fn version_matches(actual: &str, expected: &str) -> bool {
+    let actual = normalize_version(actual);
+    let expected = normalize_version(expected);
+    actual == expected
+        || (actual.starts_with(expected)
+            && actual[expected.len()..]
+                .chars()
+                .next()
+                .is_some_and(|c| !c.is_ascii_digit()))
 }
 
 /// 拉起后就绪等待：轮询 /version 直到存活或超时；期间进程退出（秒退）立即失败，
@@ -530,6 +582,23 @@ fn parse_mixed_port(config: &str) -> Option<u16> {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+    use toogl_core::models::CommandErrorKind;
+
+    // ---- 版本比对 ----
+
+    #[test]
+    fn version_matches_normalizes_prefix_and_suffix() {
+        // 精确匹配 / 无 v 前缀 / 空白容错
+        assert!(version_matches("v1.19.32", MIHOMO_EXPECTED_VERSION));
+        assert!(version_matches("1.19.32", MIHOMO_EXPECTED_VERSION));
+        assert!(version_matches("  v1.19.32 \n", MIHOMO_EXPECTED_VERSION));
+        // 含非数字后缀（构建元信息）视为一致
+        assert!(version_matches("v1.19.32-meta", MIHOMO_EXPECTED_VERSION));
+        // 不一致：别的版本 / 数字后缀延续（1.19.320 不等于 1.19.32）
+        assert!(!version_matches("v1.19.33", MIHOMO_EXPECTED_VERSION));
+        assert!(!version_matches("v1.19.320", MIHOMO_EXPECTED_VERSION));
+        assert!(!version_matches("v1.18.0", MIHOMO_EXPECTED_VERSION));
+    }
 
     // ---- 端口顺延 ----
 
@@ -840,9 +909,10 @@ mod tests {
         assert_eq!(state.port(), None);
         assert!(!state.alive().await);
         let err = state.client().unwrap_err();
-        assert_eq!(err.kind, "unavailable");
+        assert_eq!(err.kind, CommandErrorKind::Unavailable);
         assert!(err.message.contains("二进制缺失"));
-        // 错误态回收为 no-op，不 panic
+        // 错误态回收为 no-op，不 panic；版本不一致标志为 false
+        assert!(!state.version_mismatch());
         state.shutdown();
     }
 }

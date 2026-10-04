@@ -1,8 +1,8 @@
 //! M5-07 节点导入命令层（薄壳 + 编排）：订阅状态查询 / 设置订阅链接 / 手动更新 /
 //! 粘贴分享链接导入，以及 lib.rs setup 拉起的 24h 定时更新循环。
 //! 解析、拉取、托管文件与接线逻辑在 toogl_core::subscription，本文件只做编排：
-//! 拉取 → 解析 → 与手动节点并集 → 写 toogl-nodes.yaml → ensure_wired 接线 →
-//! mihomo 热重载 → 落盘订阅元信息（proxy_setting）。
+//! 拉取 → 解析 → 与手动节点并集 → ensure_wired 接线 →（备份旧文件）写
+//! toogl-nodes.yaml → mihomo 热重载（失败回滚旧文件）→ 落盘订阅元信息（proxy_setting）。
 //!
 //! 编排主体收敛在自由函数 [`run_update`] / [`import_merge`]（参数为具体值而非
 //! tauri State），使命令路径与定时任务路径共用同一实现，也便于单测。
@@ -23,8 +23,8 @@ use toogl_core::proxy_setting::{
     KEY_SUBSCRIPTION_URL,
 };
 use toogl_core::subscription::{
-    ensure_wired, fetch_subscription, parse_nodes_text, validate_subscription_url,
-    write_nodes_file, SubscriptionError,
+    ensure_wired, fetch_subscription, parse_nodes_text, restore_nodes_file,
+    validate_subscription_url, write_nodes_file, SubscriptionError, NODES_FILE_NAME,
 };
 
 use crate::commands::proxy::mihomo_err;
@@ -197,12 +197,12 @@ pub async fn import_share_text(
 
 // ---- 编排主体（自由函数，命令路径与定时任务路径共用） ----
 
-/// 订阅更新全流程：拉取 → 解析 → 与手动节点并集 → 写托管文件 → 接线 → 热重载 →
-/// 落盘订阅元信息。并发进入直接拒绝（internal「正在更新中」），不排队。
+/// 订阅更新全流程：拉取 → 解析 → 与手动节点并集 → 接线 →（备份旧文件）写托管文件 →
+/// 热重载（失败回滚旧文件）→ 落盘订阅元信息。并发进入直接拒绝（internal「正在更新中」），不排队。
 ///
-/// 失败语义：write_nodes_file 之前失败，旧托管节点文件天然不动；之后失败
-/// （接线/热重载）文件已是新节点但内核可能仍跑旧配置——记 last_error 提示，
-/// 下次成功更新或 sidecar 重启（启动即读文件）后自愈。任何失败都写
+/// 失败语义：write_nodes_file 之前失败，旧托管节点文件天然不动（接线已提前到写文件之前，
+/// 接线失败时文件也不动）；热重载失败时把备份的旧文件内容原子写回（restore 失败则在错误
+/// 文案里追加说明），保证磁盘文件与内核跑的始终是同一份。任何失败都写
 /// KEY_SUBSCRIPTION_LAST_ERROR 并向上抛；成功则清 last_error。
 pub async fn run_update(
     store: &ProxySettingStore,
@@ -239,11 +239,24 @@ async fn run_update_locked(
         let parsed = parse_nodes_text(&content).map_err(sub_err)?;
         let manual = read_nodes_kv(store, KEY_MANUAL_NODES).await?;
         let merged = merge_nodes(&manual, &parsed.nodes);
-        write_nodes_file(work_dir, &merged).map_err(sub_err)?;
+        // 接线提前到写文件之前：接线失败时托管节点文件不动，
+        // 「文件与内核不一致」的窗口只剩热重载一步（失败走下面回滚）。
         // 接线仅对本工具模板配置自动进行；用户手写配置 Wiring 错误透传，
         // 文案（core 侧）已引导手工补 proxy-providers 接线
         ensure_wired(config_path).map_err(sub_err)?;
-        client.reload_config(true).await.map_err(mihomo_err)?;
+        // 备份旧托管文件原始内容（不存在记 None），热重载失败时原子写回
+        let old_nodes = std::fs::read_to_string(work_dir.join(NODES_FILE_NAME)).ok();
+        write_nodes_file(work_dir, &merged).map_err(sub_err)?;
+        if let Err(e) = client.reload_config(true).await {
+            let mut err = mihomo_err(e);
+            match restore_nodes_file(work_dir, old_nodes.as_deref()) {
+                Ok(()) => err.message.push_str("；已回滚节点文件到更新前版本"),
+                Err(re) => err.message.push_str(&format!(
+                    "；节点文件回滚失败（文件与内核配置不一致，重启后自愈）: {re}"
+                )),
+            }
+            return Err(err);
+        }
         // 全部生效后才落盘订阅节点列表与元信息（保证 KV 与内核实际节点一致）
         let nodes_json = nodes_to_json(&parsed.nodes).map_err(CommandError::internal)?;
         store.set(KEY_SUBSCRIPTION_NODES, &nodes_json).await?;
@@ -267,7 +280,8 @@ async fn run_update_locked(
 }
 
 /// 粘贴导入全流程：解析（纯 CPU，不占锁）→ 合并进手动节点（同名覆盖）→
-/// 与订阅节点并集重写托管文件 → 接线 → 热重载 → 落盘手动节点列表。
+/// 与订阅节点并集 → 接线 →（备份旧文件）重写托管文件 → 热重载（失败回滚旧文件）→
+/// 落盘手动节点列表。一致性窗口处理与 run_update 相同（接线提前 + reload 失败回滚）。
 pub async fn import_merge(
     store: &ProxySettingStore,
     work_dir: &Path,
@@ -304,9 +318,20 @@ async fn import_merge_locked(
 
     let subscription = read_nodes_kv(store, KEY_SUBSCRIPTION_NODES).await?;
     let merged = merge_nodes(&manual, &subscription);
-    write_nodes_file(work_dir, &merged).map_err(sub_err)?;
+    // 接线提前 + 热重载失败回滚，与 run_update 同一份一致性保证
     ensure_wired(config_path).map_err(sub_err)?;
-    client.reload_config(true).await.map_err(mihomo_err)?;
+    let old_nodes = std::fs::read_to_string(work_dir.join(NODES_FILE_NAME)).ok();
+    write_nodes_file(work_dir, &merged).map_err(sub_err)?;
+    if let Err(e) = client.reload_config(true).await {
+        let mut err = mihomo_err(e);
+        match restore_nodes_file(work_dir, old_nodes.as_deref()) {
+            Ok(()) => err.message.push_str("；已回滚节点文件到导入前版本"),
+            Err(re) => err.message.push_str(&format!(
+                "；节点文件回滚失败（文件与内核配置不一致，重启后自愈）: {re}"
+            )),
+        }
+        return Err(err);
+    }
 
     let json = nodes_to_json(&manual).map_err(CommandError::internal)?;
     store.set(KEY_MANUAL_NODES, &json).await?;
@@ -495,6 +520,7 @@ fn now_rfc3339() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use toogl_core::models::CommandErrorKind;
     use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -626,7 +652,7 @@ mod tests {
         let err = run_update(&store, &work_dir, &config_path, &client, &updating)
             .await
             .unwrap_err();
-        assert_eq!(err.kind, "network");
+        assert_eq!(err.kind, CommandErrorKind::Network);
         assert!(err.message.contains("500"));
 
         let file = std::fs::read_to_string(work_dir.join("toogl-nodes.yaml")).unwrap();
@@ -641,6 +667,94 @@ mod tests {
         assert!(last_error.contains("500"));
     }
 
+    /// 热重载失败：托管文件回滚到更新前的旧内容（文件与内核保持同一份），
+    /// last_error 落盘（含回滚说明），错误向上抛
+    #[tokio::test]
+    async fn run_update_reload_failure_rolls_back_file_and_records_error() {
+        let (_tmp, store, work_dir, config_path, updating) = fixture().await;
+        // 先成功一次（订阅含香港 01，托管文件落盘旧版本）
+        let (sub, mihomo, client) = mock_servers(200, LINK_HK).await;
+        store
+            .set(KEY_SUBSCRIPTION_URL, &format!("{}/feed", sub.uri()))
+            .await
+            .unwrap();
+        run_update(&store, &work_dir, &config_path, &client, &updating)
+            .await
+            .unwrap();
+        mihomo.verify().await;
+        let old_file = std::fs::read_to_string(work_dir.join(NODES_FILE_NAME)).unwrap();
+        assert!(old_file.contains("name: 香港 01"));
+
+        // 订阅内容换成日本 01；mihomo 热重载改挂 500
+        // （wiremock 先挂载的 mock 优先匹配，两侧都需先 reset 再挂新 mock）
+        sub.reset().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(LINK_JP))
+            .mount(&sub)
+            .await;
+        mihomo.reset().await;
+        Mock::given(method("PUT"))
+            .and(path("/configs"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&mihomo)
+            .await;
+
+        let err = run_update(&store, &work_dir, &config_path, &client, &updating)
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, CommandErrorKind::Internal);
+        assert!(err.message.contains("已回滚"));
+
+        // 文件内容恢复旧值（与首次写入逐字节一致）
+        let file = std::fs::read_to_string(work_dir.join(NODES_FILE_NAME)).unwrap();
+        assert_eq!(file, old_file);
+        // last_error 落盘且带回滚说明
+        let last_error = store
+            .get(KEY_SUBSCRIPTION_LAST_ERROR)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(last_error.contains("已回滚"));
+        // 订阅节点 KV 未更新（仍是香港 01），与文件/内核一致
+        let nodes_json = store.get(KEY_SUBSCRIPTION_NODES).await.unwrap().unwrap();
+        assert_eq!(kv_json_names(&nodes_json), ["香港 01"]);
+    }
+
+    /// 热重载失败且更新前无托管文件（首次更新）：回滚即删除新文件，不残留
+    #[tokio::test]
+    async fn run_update_reload_failure_without_old_file_removes_new_file() {
+        let (_tmp, store, work_dir, config_path, updating) = fixture().await;
+        let sub = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(LINK_HK))
+            .mount(&sub)
+            .await;
+        let mihomo = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/configs"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&mihomo)
+            .await;
+        let client = MihomoClient::new(mihomo.uri(), None);
+        store
+            .set(KEY_SUBSCRIPTION_URL, &format!("{}/feed", sub.uri()))
+            .await
+            .unwrap();
+
+        let err = run_update(&store, &work_dir, &config_path, &client, &updating)
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, CommandErrorKind::Internal);
+        // 新写入的托管文件已被回滚删除
+        assert!(!work_dir.join(NODES_FILE_NAME).exists());
+        assert!(store
+            .get(KEY_SUBSCRIPTION_LAST_ERROR)
+            .await
+            .unwrap()
+            .unwrap()
+            .contains("已回滚"));
+    }
+
     #[tokio::test]
     async fn run_update_without_url_is_not_found() {
         let (_tmp, store, work_dir, config_path, updating) = fixture().await;
@@ -649,7 +763,7 @@ mod tests {
         let err = run_update(&store, &work_dir, &config_path, &client, &updating)
             .await
             .unwrap_err();
-        assert_eq!(err.kind, "not_found");
+        assert_eq!(err.kind, CommandErrorKind::NotFound);
         assert!(err.message.contains("未配置订阅链接"));
     }
 
@@ -662,7 +776,7 @@ mod tests {
         let err = run_update(&store, &work_dir, &config_path, &client, &updating)
             .await
             .unwrap_err();
-        assert_eq!(err.kind, "internal");
+        assert_eq!(err.kind, CommandErrorKind::Internal);
         assert!(err.message.contains("正在更新中"));
     }
 
@@ -730,29 +844,69 @@ mod tests {
         mihomo.verify().await;
     }
 
+    /// 粘贴导入热重载失败：托管文件回滚到导入前内容，手动节点 KV 不写入
+    #[tokio::test]
+    async fn import_merge_reload_failure_rolls_back_file() {
+        let (_tmp, store, work_dir, config_path, updating) = fixture().await;
+        let mihomo = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/configs"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&mihomo)
+            .await;
+        let client = MihomoClient::new(mihomo.uri(), None);
+
+        // 首次导入成功（香港 01）
+        import_merge(&store, &work_dir, &config_path, &client, &updating, LINK_HK)
+            .await
+            .unwrap();
+        mihomo.verify().await;
+        let old_file = std::fs::read_to_string(work_dir.join(NODES_FILE_NAME)).unwrap();
+
+        // 第二次导入（日本 01）热重载 500（先 reset 再挂，先挂的 mock 优先匹配）
+        mihomo.reset().await;
+        Mock::given(method("PUT"))
+            .and(path("/configs"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&mihomo)
+            .await;
+        let err = import_merge(&store, &work_dir, &config_path, &client, &updating, LINK_JP)
+            .await
+            .unwrap_err();
+        assert!(err.message.contains("已回滚"));
+        // 文件回滚为导入前内容；手动节点 KV 未写入（仍是香港 01）
+        assert_eq!(
+            std::fs::read_to_string(work_dir.join(NODES_FILE_NAME)).unwrap(),
+            old_file
+        );
+        let manual_json = store.get(KEY_MANUAL_NODES).await.unwrap().unwrap();
+        assert_eq!(kv_json_names(&manual_json), ["香港 01"]);
+    }
+
     // ---- 错误映射与辅助函数 ----
 
     #[test]
     fn sub_err_mapping() {
         assert_eq!(
             sub_err(SubscriptionError::Fetch("HTTP 401".into())).kind,
-            "unauthorized"
+            CommandErrorKind::Unauthorized
         );
         assert_eq!(
             sub_err(SubscriptionError::Fetch("HTTP 403".into())).kind,
-            "unauthorized"
+            CommandErrorKind::Unauthorized
         );
         assert_eq!(
             sub_err(SubscriptionError::Fetch("超时".into())).kind,
-            "network"
+            CommandErrorKind::Network
         );
         assert_eq!(
             sub_err(SubscriptionError::Parse("坏内容".into())).kind,
-            "internal"
+            CommandErrorKind::Internal
         );
         assert_eq!(
             sub_err(SubscriptionError::Wiring("手工接线".into())).kind,
-            "internal"
+            CommandErrorKind::Internal
         );
     }
 

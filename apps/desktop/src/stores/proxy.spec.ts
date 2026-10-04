@@ -47,6 +47,7 @@ function statusOf(overrides: Partial<ProxyStatus> = {}): ProxyStatus {
     system_proxy_leftover: false,
     leftover_previous: null,
     remembered_selection: null,
+    version_mismatch: false,
     ...overrides,
   }
 }

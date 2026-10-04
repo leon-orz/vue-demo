@@ -259,6 +259,7 @@ pub async fn proxy_status(
         system_proxy_leftover: check.as_ref().is_some_and(|c| c.leftover),
         leftover_previous: check.and_then(|c| c.previous),
         remembered_selection,
+        version_mismatch: core.version_mismatch(),
     })
 }
 
@@ -366,17 +367,21 @@ pub async fn recover_system_proxy(state: State<'_, ProxyCommandState>) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use toogl_core::models::CommandErrorKind;
 
     #[test]
     fn mihomo_error_maps_to_command_error() {
         assert_eq!(
             mihomo_err(MihomoError::Unreachable("拒连".into())).kind,
-            "network"
+            CommandErrorKind::Network
         );
-        assert_eq!(mihomo_err(MihomoError::Api("404".into())).kind, "internal");
+        assert_eq!(
+            mihomo_err(MihomoError::Api("404".into())).kind,
+            CommandErrorKind::Internal
+        );
         assert_eq!(
             mihomo_err(MihomoError::Parse("坏包".into())).kind,
-            "internal"
+            CommandErrorKind::Internal
         );
     }
 
@@ -384,7 +389,7 @@ mod tests {
     fn degraded_state_reports_unavailable() {
         let state = ProxyCommandState::unavailable("库打不开".into());
         let err = state.require_sysproxy().err().unwrap();
-        assert_eq!(err.kind, "unavailable");
+        assert_eq!(err.kind, CommandErrorKind::Unavailable);
         assert!(err.message.contains("库打不开"));
         assert!(state.settings().is_none());
         assert!(state.leftover_check().is_none());

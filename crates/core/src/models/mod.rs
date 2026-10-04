@@ -6,7 +6,7 @@ pub mod sysproxy;
 pub mod usage;
 
 pub use credential::Credential;
-pub use error::CommandError;
+pub use error::{CommandError, CommandErrorKind};
 pub use proxy::{
     DelayStatus, MihomoVersion, NodeDelayResult, ProxiesSummary, ProxyGroup, ProxyGroupType,
     ProxyNode, ProxySelection, ProxyStatus, RuleMode,

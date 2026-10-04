@@ -50,6 +50,28 @@ pub fn write_nodes_file(work_dir: &Path, nodes: &[Mapping]) -> Result<PathBuf, S
     Ok(path)
 }
 
+/// 按原始内容恢复托管节点文件（热重载失败后的回滚用）：
+/// Some 走与 write_nodes_file 相同的 tmp+rename 原子写；
+/// None 表示写入前文件本不存在，直接删除（不存在视为已成功）。
+pub fn restore_nodes_file(work_dir: &Path, content: Option<&str>) -> Result<(), SubscriptionError> {
+    let path = work_dir.join(NODES_FILE_NAME);
+    match content {
+        Some(content) => {
+            let tmp = work_dir.join(format!("{NODES_FILE_NAME}.tmp"));
+            std::fs::write(&tmp, content)
+                .map_err(|e| SubscriptionError::Io(format!("节点文件回滚写入失败: {e}")))?;
+            std::fs::rename(&tmp, &path)
+                .map_err(|e| SubscriptionError::Io(format!("节点文件回滚替换失败: {e}")))?;
+            Ok(())
+        }
+        None => match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(SubscriptionError::Io(format!("节点文件回滚删除失败: {e}"))),
+        },
+    }
+}
+
 /// 确保 config.yaml 已接线到托管节点文件：
 /// - 已接线（结构化判断：proxy-providers 有 toogl 且「节点选择」组 use 含 toogl）→ Ok(false)；
 /// - 未接线且为本工具首跑模板（含模板标记）→ 自动接线：加 proxy-providers、
@@ -266,6 +288,28 @@ mod tests {
             Some(&Value::Sequence(vec![]))
         );
         assert!(!tmp.path().join(format!("{NODES_FILE_NAME}.tmp")).exists());
+    }
+
+    // ---- restore_nodes_file ----
+
+    #[test]
+    fn restore_nodes_file_writes_back_and_removes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(NODES_FILE_NAME);
+
+        // Some：原子写回旧内容（tmp 不残留）
+        restore_nodes_file(tmp.path(), Some("# 旧内容\nproxies: []\n")).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "# 旧内容\nproxies: []\n"
+        );
+        assert!(!tmp.path().join(format!("{NODES_FILE_NAME}.tmp")).exists());
+
+        // None：文件存在则删除
+        restore_nodes_file(tmp.path(), None).unwrap();
+        assert!(!path.exists());
+        // None：文件本不存在视为成功（幂等）
+        restore_nodes_file(tmp.path(), None).unwrap();
     }
 
     // ---- ensure_wired ----

@@ -16,7 +16,7 @@ pub mod content;
 pub mod fetch;
 pub mod share;
 
-pub use config::{ensure_wired, write_nodes_file, NODES_FILE_NAME};
+pub use config::{ensure_wired, restore_nodes_file, write_nodes_file, NODES_FILE_NAME};
 pub use content::{parse_nodes_text, NodeFailure, ParsedNodes};
 pub use fetch::{fetch_subscription, validate_subscription_url};
 pub use share::parse_share_link;

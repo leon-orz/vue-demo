@@ -160,6 +160,9 @@ pub struct ProxyStatus {
     pub leftover_previous: Option<SystemProxyStatus>,
     /// 记住的节点选择（供 UI 初始展示兜底；事实源以 proxies[].now 为准）
     pub remembered_selection: Option<ProxySelection>,
+    /// mihomo 内核版本与打包期望版本不一致（sidecar 拉起时一次性比对，
+    /// 见 sidecar::MIHOMO_EXPECTED_VERSION；仅提示不阻断，sidecar 不可用为 false）
+    pub version_mismatch: bool,
 }
 
 /// mihomo 内核版本（GET /version，兼作存活探测）

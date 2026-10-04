@@ -4,13 +4,11 @@
  * 后端约定：invoke 失败时 reject 结构化对象 { kind, message }（Rust 侧 CommandError，
  * 见 crates/core/src/models/error.rs）；类型 re-export 自 ts-rs 生成物。
  */
-import type { CommandError } from '@toogl/core-types'
+import type { CommandError, CommandErrorKind } from '@toogl/core-types'
 
-export type { CommandError }
+export type { CommandError, CommandErrorKind }
 
-/** 错误类别：unauthorized 引导去设置页；network 可重试；其余按 message 展示 */
-export type CommandErrorKind = 'unauthorized' | 'network' | 'not_found' | 'internal' | 'unavailable'
-
+/** 合法 kind 白名单（对照生成的 CommandErrorKind 联合类型） */
 const KINDS: readonly CommandErrorKind[] = [
   'unauthorized',
   'network',

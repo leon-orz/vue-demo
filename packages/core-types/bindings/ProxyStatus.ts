@@ -49,4 +49,9 @@ leftover_previous: SystemProxyStatus | null,
 /**
  * 记住的节点选择（供 UI 初始展示兜底；事实源以 proxies[].now 为准）
  */
-remembered_selection: ProxySelection | null, };
+remembered_selection: ProxySelection | null, 
+/**
+ * mihomo 内核版本与打包期望版本不一致（sidecar 拉起时一次性比对，
+ * 见 sidecar::MIHOMO_EXPECTED_VERSION；仅提示不阻断，sidecar 不可用为 false）
+ */
+version_mismatch: boolean, };

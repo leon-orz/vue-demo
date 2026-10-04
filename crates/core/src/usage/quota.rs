@@ -143,7 +143,7 @@ fn merge_kimi_snapshot(
 mod tests {
     use super::*;
     use crate::keystore::MemoryStore;
-    use crate::models::PlatformAccountInput;
+    use crate::models::{CommandErrorKind, PlatformAccountInput};
     use crate::usage::account::{default_credential_ref, set_row};
     use sqlx::sqlite::SqliteConnectOptions;
     use wiremock::matchers::{method, path};
@@ -297,7 +297,7 @@ mod tests {
         let err = refresh_with(&pool, &secrets, Platform::Kimi, Some(&server.uri()))
             .await
             .unwrap_err();
-        assert_eq!(err.kind, "unauthorized");
+        assert_eq!(err.kind, CommandErrorKind::Unauthorized);
         // 失败不落快照
         assert_eq!(snapshot_count(&pool, "kimi").await, 0);
     }
@@ -308,14 +308,14 @@ mod tests {
         let secrets = MemoryStore::default();
         // 未配置账户
         let err = refresh(&pool, &secrets, Platform::Kimi).await.unwrap_err();
-        assert_eq!(err.kind, "not_found");
+        assert_eq!(err.kind, CommandErrorKind::NotFound);
 
         // 配置了账户但 keyring 无 key
         set_row(&pool, Platform::Kimi, &input(Platform::Kimi, None))
             .await
             .unwrap();
         let err = refresh(&pool, &secrets, Platform::Kimi).await.unwrap_err();
-        assert_eq!(err.kind, "not_found");
+        assert_eq!(err.kind, CommandErrorKind::NotFound);
 
         // 账户停用
         let mut disabled = input(Platform::Kimi, None);
@@ -325,7 +325,7 @@ mod tests {
             .set(default_credential_ref(Platform::Kimi), "sk-test")
             .unwrap();
         let err = refresh(&pool, &secrets, Platform::Kimi).await.unwrap_err();
-        assert_eq!(err.kind, "unavailable");
+        assert_eq!(err.kind, CommandErrorKind::Unavailable);
     }
 
     // ---- detail_json 前后端契约锁 ----
