@@ -33,6 +33,8 @@ crates/
                           #   logs/（文件游标扫描入库骨架，按平台泛化保留）/
                           #   usage/（编排层：query 聚合查询、quota 配额刷新、account 账户配置）/
                           #   sysproxy.rs（系统代理读写与现场备份还原）、proxy_setting.rs（代理设置持久化）、
+                          #   subscription/（M5-07 节点导入 core：分享链接解析 share / 内容形态识别 content /
+                          #   订阅拉取 fetch / 托管节点文件与 config.yaml 接线 config）、
                           #   db.rs（SQLite 连接与迁移执行）
                           #   migrations/（SQLite schema，由 src/db.rs 按版本号迁移执行）
                           #   （mimocode / omp parser 与 deepseek / mimo 适配器已随 2026-10-02 决策删除，git 历史可恢复）
@@ -102,7 +104,8 @@ cargo test -p toogl-core -- --ignored keyring_real_roundtrip   # 真实系统钥
 
 - 已就绪：monorepo 脚手架与 CI、凭据读写收进 `platform_account_set`（keyring 显式 windows-native，SERVICE_NAME 统一在 `keystore::KEYRING_SERVICE_NAME`）、Rust 侧统一 schema 迁移（`crates/core/migrations/`，事件/日聚合/游标表带 `platform`+`cli` 维度，另有 quota_snapshot / platform_account / proxy_setting，由 `db::migrate` 幂等执行；tauri-plugin-sql 已移除）、kimicode wire.jsonl parser（归一化为 UsageEvent，走 `crates/core/logs/` 共享增量游标 + 按日预聚合骨架；单文件容错 + size/mtime 变化触发幂等重扫；扫描互斥锁防并发双计）、`crates/core/usage/` 编排层（聚合查询 query / 配额刷新 quota / 账户配置 account）、Kimi 配额适配器（`adapters/kimi.rs` 余额 + 非官方 coding usages best-effort；wiremock 覆盖 401/超时/字段缺失）、Tauri commands（`commands/usage.rs` 九条命令，统一返回结构化 `CommandError`）、前端 Kimi 单平台用量页（`views/Usage.vue` + QuotaCard 降级态；`stores/usage.ts`）、Dashboard Kimi 摘要卡 + 代理卡、设置页 Kimi 分区（key + api_base + 日志目录覆盖）、ts-rs bindings 链路（含 index.ts 完整性测试）。Platform 枚举收缩为仅 `Kimi`（PlatformFilter 保留 all/kimi），schema 与命令层 platform 维度泛化不动，migration 0006 清理存量非 kimi 数据。
 - M5 魔法工具（S1-3）：mihomo v1.19.32 sidecar（`src-tauri/binaries/` 固定版本，sha256 与官方 release digest 一致；externalBin + tauri-plugin-shell；setup 拉起 / `RunEvent::Exit` 回收；external-controller 仅回环、端口顺延 9090-9100 持久化到 proxy_setting；首跑生成仅回环初始配置模板）、`crates/core/mihomo/client.rs` RESTful 客户端（代理组/切节点/并发测速/模式切换/存活探测）、`crates/core/sysproxy.rs` 系统代理（RegistryIo/ProxyStateStore seam，开启备份现场/关闭无损还原/崩溃残留自检恢复，测试全 mock 不碰真实注册表）、proxy 命令六条（`commands/proxy.rs`：`proxy_status` 字段级降级、`select_proxy`、`test_delay`、`set_system_proxy`、`switch_rule_mode`、`recover_system_proxy`；退出钩子先恢复系统代理再杀 sidecar）、前端 `views/Proxy.vue` + `stores/proxy.ts`（4s 轮询、乐观更新失败回滚、残留提示恢复流）。
-- 骨架待落地：节点导入（M5-07 分享链接/订阅，S1-3 拆出的后续任务）、HubSource（S2-2）、hub API /usage /config /control（S2-1，现仅 /api/v1/health）。（S2 项随阶段二冻结暂停）
+- M5-07 节点导入（2026-10-04 落地）：core `crates/core/src/subscription/`（share 分享链接解析 / content 内容形态识别逐条容错 / fetch 订阅拉取 15s 超时 + UA 伪装 / config 托管节点文件 toogl-nodes.yaml + config.yaml 一次性接线 proxy-providers file provider，用户手写配置不自动改）、`MihomoClient::reload_config` 热重载、桌面端 `commands/subscription.rs` 四条命令（`subscription_status` / `subscription_set_url` / `subscription_update` / `import_share_text`；并发拒绝互斥、失败保留旧节点记 last_error、手动节点优先并集去重）+ 24h 定时更新循环（setup spawn，sidecar 未运行记 last_error 跳过）、前端 Proxy.vue「节点订阅」卡 + `stores/subscription.ts` + `api/subscription.ts`。
+- 骨架待落地：HubSource（S2-2）、hub API /usage /config /control（S2-1，现仅 /api/v1/health）。（S2 项随阶段二冻结暂停）
 - **2026-10-02 决策**：M3 服务器 / M4 NAS 两模块取消（用户近期无时间维护一体机，编号保留不复用），阶段二（一体机/hub）随之冻结；`apps/hub` 骨架保留冻结，仅 `/api/v1/health`。同日 M1 收缩：MiMo Code / omp / DeepSeek 的 parser（`mimocode/`、`omp/`）、适配器（`adapters/mimo.rs`、`deepseek.rs`）与前端多平台 UI 全部删除（git 历史可恢复），omp/dsh/MiMo 将来回归时从 git 捞。
 - 已知占位：用量估值单价表全 0（estimated_cost 恒 0，待官方价格确认，将迁移为 M6 可配置项）。
-- 人工验收待补：Kimi `/coding/v1/usages` 格式为推测待真机确认（S1-4 其余两项随平台砍掉作废）；S1-3 真机联调（sidecar 拉起无孤儿进程、切节点出口 IP 变化、系统代理注册表实测、强杀后残留自检恢复）。
+- 人工验收待补：Kimi `/coding/v1/usages` 格式为推测待真机确认（S1-4 其余两项随平台砍掉作废）；S1-3 真机联调（sidecar 拉起无孤儿进程、切节点出口 IP 变化、系统代理注册表实测、强杀后残留自检恢复）；M5-07 真机联调（订阅链接导入后节点出现在代理组、断网刷新保留旧节点并告警、粘贴导入与订阅并集去重）。

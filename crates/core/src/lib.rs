@@ -11,5 +11,6 @@ pub mod logs;
 pub mod mihomo;
 pub mod models;
 pub mod proxy_setting;
+pub mod subscription;
 pub mod sysproxy;
 pub mod usage;

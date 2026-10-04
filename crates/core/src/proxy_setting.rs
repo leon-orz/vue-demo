@@ -27,6 +27,16 @@ pub const KEY_PROXY_BACKUP: &str = "sysproxy.backup_state";
 pub const KEY_SELECTION: &str = "proxy.selection";
 /// 记住的规则模式（值：rule/global/direct 小写串；事实源为 mihomo /configs，仅降级兜底）
 pub const KEY_RULE_MODE: &str = "proxy.rule_mode";
+/// 订阅链接（值：URL 字符串；M5-07 节点导入，桌面端编排层读写）
+pub const KEY_SUBSCRIPTION_URL: &str = "proxy.subscription_url";
+/// 订阅节点列表（值：mihomo proxies 条目数组的 JSON 串，同 KEY_SELECTION 先例；core 只给键，序列化在桌面端）
+pub const KEY_SUBSCRIPTION_NODES: &str = "proxy.subscription_nodes";
+/// 订阅上次成功更新时间（值：RFC 3339 字符串）
+pub const KEY_SUBSCRIPTION_LAST_UPDATED: &str = "proxy.subscription_last_updated";
+/// 订阅上次更新失败原因（值：错误文案；成功时清除）
+pub const KEY_SUBSCRIPTION_LAST_ERROR: &str = "proxy.subscription_last_error";
+/// 手动粘贴导入的节点列表（值：mihomo proxies 条目数组的 JSON 串）
+pub const KEY_MANUAL_NODES: &str = "proxy.manual_nodes";
 
 /// 生成 external-controller 鉴权密钥：32 位随机 hex（UUID v4 去连字符）。
 /// 纯本地随机，不回源；写入 mihomo 配置 secret 字段并持久化到 proxy_setting。

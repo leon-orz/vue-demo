@@ -21,6 +21,11 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio",
 dirs = "6"
 # mihomo external-controller 随机 secret 生成（v4 随机 UUID，simple 形态即 32 位 hex）
 uuid = { version = "1", features = ["v4"] }
+# 订阅/分享链接导入（subscription 模块）：mihomo 配置 YAML 结构化读写、
+# ss/vless 等分享链接的 base64 段解码与 URL query 解析（base64 与 url 均已在依赖树中锁定）
+serde_yaml = "0.9"
+base64 = "0.22"
+url = "2"
 
 # 系统代理（sysproxy 模块）仅 Windows 编译：注册表读写 + wininet 变更通知
 # （两个版本均已在依赖树锁定：winreg 经 embed-resource、windows-sys 0.59 经 winreg）

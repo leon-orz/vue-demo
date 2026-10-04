@@ -24,6 +24,10 @@ pub fn run() {
             commands::proxy::set_system_proxy,
             commands::proxy::switch_rule_mode,
             commands::proxy::recover_system_proxy,
+            commands::subscription::subscription_status,
+            commands::subscription::subscription_set_url,
+            commands::subscription::subscription_update,
+            commands::subscription::import_share_text,
         ])
         .setup(|app| {
             // 用量模块状态：初始化失败不 panic，降级为错误态（命令统一返回 unavailable），
@@ -65,6 +69,24 @@ pub fn run() {
                 )),
             };
             app.manage(proxy_cmd_state);
+
+            // M5-07：订阅命令层状态（proxy_setting KV + mihomo 工作目录路径 + 更新互斥标志）。
+            let subscription_state = match app.path().app_data_dir() {
+                Ok(dir) => tauri::async_runtime::block_on(
+                    commands::subscription::SubscriptionCommandState::new(dir),
+                ),
+                Err(e) => commands::subscription::SubscriptionCommandState::unavailable(format!(
+                    "无法解析 app data 目录: {e}"
+                )),
+            };
+            // 订阅定时更新（24h）：sidecar 就绪与否由任务内部探测（端口/secret 从
+            // proxy_setting 自取），未运行只记 last_error 跳过本次，不影响任务存活
+            if let Some(updater) = subscription_state.updater() {
+                tauri::async_runtime::spawn(commands::subscription::subscription_refresh_loop(
+                    updater,
+                ));
+            }
+            app.manage(subscription_state);
             Ok(())
         })
         .build(tauri::generate_context!())

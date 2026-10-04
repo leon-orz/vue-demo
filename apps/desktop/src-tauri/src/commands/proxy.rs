@@ -171,7 +171,7 @@ impl ProxyCommandState {
 }
 
 /// MihomoError → CommandError：不可达归 network，其余归 internal
-fn mihomo_err(e: MihomoError) -> CommandError {
+pub(crate) fn mihomo_err(e: MihomoError) -> CommandError {
     match e {
         MihomoError::Unreachable(m) => CommandError::network(m),
         MihomoError::Api(m) | MihomoError::Parse(m) => CommandError::internal(m),

@@ -1,6 +1,7 @@
 pub mod credential;
 pub mod error;
 pub mod proxy;
+pub mod subscription;
 pub mod sysproxy;
 pub mod usage;
 
@@ -10,6 +11,7 @@ pub use proxy::{
     DelayStatus, MihomoVersion, NodeDelayResult, ProxiesSummary, ProxyGroup, ProxyGroupType,
     ProxyNode, ProxySelection, ProxyStatus, RuleMode,
 };
+pub use subscription::{ImportResult, SubscriptionInfo};
 pub use sysproxy::{SystemProxyCheck, SystemProxyStatus};
 pub use usage::{
     LogFileCursor, Platform, PlatformAccountInfo, PlatformAccountInput, PlatformFilter,

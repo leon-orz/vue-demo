@@ -1,6 +1,6 @@
 //! mihomo RESTful API 客户端实现（M5 核心三件套的远端一半；系统代理在 sysproxy 模块）。
 //! 端点覆盖：GET /proxies、PUT /proxies/{group}、GET /proxies/{name}/delay、
-//! PATCH /configs、GET /version。reqwest client 进程级复用（同 adapters 的静态模式）。
+//! PATCH /configs、PUT /configs?force=（热重载）、GET /version。reqwest client 进程级复用（同 adapters 的静态模式）。
 //! 鉴权：构造时传入 external-controller secret（Option），所有请求自动带
 //! `Authorization: Bearer <secret>` 头；未配置 secret 的旧部署不带头。
 
@@ -274,6 +274,22 @@ impl MihomoClient {
             .map_err(|e| MihomoError::Parse(e.to_string()))?;
         RuleMode::parse(&body.mode)
             .ok_or_else(|| MihomoError::Parse(format!("未知规则模式: {}", body.mode)))
+    }
+
+    /// PUT /configs?force=true|false：热重载配置文件（节点导入后让内核重读 config.yaml
+    /// 与 proxy-providers 指向的托管节点文件）。force=true 跳过配置缓存比较强制重载。
+    /// mihomo API 要求 body 为 JSON 对象，空对象 `{}` 即可。
+    pub async fn reload_config(&self, force: bool) -> Result<(), MihomoError> {
+        self.send(
+            self.authed(
+                self.client
+                    .put(self.endpoint(&["configs"])?)
+                    .query(&[("force", force.to_string())])
+                    .json(&serde_json::json!({})),
+            ),
+        )
+        .await?;
+        Ok(())
     }
 
     /// GET /version：存活探测 + 内核版本
@@ -758,6 +774,54 @@ mod tests {
 
         let err = client(&server).get_mode().await.unwrap_err();
         assert!(matches!(err, MihomoError::Parse(_)));
+    }
+
+    // ---- PUT /configs?force=（热重载） ----
+
+    #[tokio::test]
+    async fn reload_config_sends_force_query_and_empty_object_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/configs"))
+            .and(query_param("force", "true"))
+            .and(body_json(serde_json::json!({})))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        client(&server).reload_config(true).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reload_config_accepts_200_and_sends_force_false() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/configs"))
+            .and(query_param("force", "false"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        client(&server).reload_config(false).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reload_config_api_error_on_404() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let err = client(&server).reload_config(true).await.unwrap_err();
+        assert!(matches!(err, MihomoError::Api(_)));
+    }
+
+    #[tokio::test]
+    async fn reload_config_unreachable_when_connection_refused() {
+        let c = MihomoClient::new("http://127.0.0.1:1", None);
+        let err = c.reload_config(false).await.unwrap_err();
+        assert!(matches!(err, MihomoError::Unreachable(_)));
     }
 
     // ---- collect_test_node_names ----
