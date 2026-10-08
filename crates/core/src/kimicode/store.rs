@@ -2,8 +2,8 @@
 //! 扫描入库骨架（游标 upsert / 截断整批重建 / 日聚合重算 / 扫描互斥锁）收在
 //! crate::logs::store::LogStore，本 store 只是 platform="kimi"、cli="kimi-code" 的薄壳。
 //! 表结构由 crates/core/migrations/ 定义，经 crate::db 按版本号迁移执行（schema 统一收归 Rust 侧）。
-//! 聚合查询已泛化到 usage::query（按 platform 过滤 / 'all' 合计）；
-//! 本 store 保留的 summary / usage_by_* / usage_series 只是 Some(Platform::Kimi) 的薄委托。
+//! 聚合查询在 usage::query（按 platform 过滤 / 'all' 合计），生产入口是 UsageService；
+//! 本 store 不再保留薄委托，测试与 example 直接调 usage::query。
 
 use std::path::Path;
 
@@ -12,7 +12,7 @@ use sqlx::sqlite::SqlitePool;
 use super::scanner;
 use super::{KimiError, KIMI_CLI};
 use crate::logs::store::LogStore;
-use crate::models::{Platform, ScanReport, UsageGroup, UsageRange, UsageSeries, UsageSummary};
+use crate::models::{Platform, ScanReport};
 
 #[derive(Debug, Clone)]
 pub struct KimiStore {
@@ -45,48 +45,48 @@ impl KimiStore {
     }
 
     /// 扫描并入库：重扫 → 写事件 → 按需重算日聚合，全程幂等。
-    /// 并发调用经互斥锁排队，保证不会双计入库。
+    /// 并发调用经互斥锁排队（同一 LogStore 实例内串行，详见 LogStore::scan_lock 注释）。
     pub async fn scan_and_record(&self, sessions_root: &Path) -> Result<ScanReport, KimiError> {
         Ok(self
             .inner
             .scan_and_record(sessions_root, scanner::scan)
             .await?)
     }
-
-    // ---- 聚合查询：薄委托 usage::query（泛化查询层，本平台固定 Some(Platform::Kimi)） ----
-
-    pub async fn summary(&self, range: UsageRange) -> Result<UsageSummary, KimiError> {
-        Ok(crate::usage::query::summary(self.inner.pool(), Some(Platform::Kimi), range).await?)
-    }
-
-    pub async fn usage_by_project(&self, range: UsageRange) -> Result<Vec<UsageGroup>, KimiError> {
-        Ok(
-            crate::usage::query::usage_by_project(self.inner.pool(), Some(Platform::Kimi), range)
-                .await?,
-        )
-    }
-
-    pub async fn usage_by_model(&self, range: UsageRange) -> Result<Vec<UsageGroup>, KimiError> {
-        Ok(
-            crate::usage::query::usage_by_model(self.inner.pool(), Some(Platform::Kimi), range)
-                .await?,
-        )
-    }
-
-    /// 用量趋势时间序列（Day / Last5Hours 按小时、Week / Month 按日分桶）
-    pub async fn usage_series(&self, range: UsageRange) -> Result<UsageSeries, KimiError> {
-        Ok(
-            crate::usage::query::usage_series(self.inner.pool(), Some(Platform::Kimi), range)
-                .await?,
-        )
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::{UsageGroup, UsageRange, UsageSeries, UsageSummary};
+    use crate::usage::query;
     use chrono::{Local, TimeZone, Utc};
     use std::io::Write;
+
+    /// 聚合查询走泛化查询层 usage::query（本平台固定 Some(Platform::Kimi)），
+    /// 与生产路径 UsageService → usage::query 一致
+    async fn query_summary(store: &KimiStore, range: UsageRange) -> UsageSummary {
+        query::summary(store.inner.pool(), Some(Platform::Kimi), range)
+            .await
+            .unwrap()
+    }
+
+    async fn query_by_project(store: &KimiStore, range: UsageRange) -> Vec<UsageGroup> {
+        query::usage_by_project(store.inner.pool(), Some(Platform::Kimi), range)
+            .await
+            .unwrap()
+    }
+
+    async fn query_by_model(store: &KimiStore, range: UsageRange) -> Vec<UsageGroup> {
+        query::usage_by_model(store.inner.pool(), Some(Platform::Kimi), range)
+            .await
+            .unwrap()
+    }
+
+    async fn query_series(store: &KimiStore, range: UsageRange) -> UsageSeries {
+        query::usage_series(store.inner.pool(), Some(Platform::Kimi), range)
+            .await
+            .unwrap()
+    }
 
     async fn temp_store() -> (tempfile::TempDir, KimiStore) {
         let tmp = tempfile::tempdir().unwrap();
@@ -144,7 +144,7 @@ mod tests {
         assert_eq!(report.files_found, 2);
         assert_eq!(report.events_added, 3);
 
-        let summary = store.summary(UsageRange::Day).await.unwrap();
+        let summary = query_summary(&store, UsageRange::Day).await;
         assert_eq!(summary.totals.input_other, 350);
         assert_eq!(summary.totals.output, 35);
         assert_eq!(summary.totals.cache_read, 950);
@@ -154,7 +154,7 @@ mod tests {
         // 再扫一次：无新增（增量游标生效，事件不重复）
         let report2 = store.scan_and_record(tmp.path()).await.unwrap();
         assert_eq!(report2.events_added, 0);
-        let summary2 = store.summary(UsageRange::Day).await.unwrap();
+        let summary2 = query_summary(&store, UsageRange::Day).await;
         assert_eq!(summary2.totals.input_other, 350);
     }
 
@@ -181,14 +181,14 @@ mod tests {
         let report = store.scan_and_record(tmp.path()).await.unwrap();
         assert_eq!(report.events_added, 2);
         assert_eq!(report.files_rescanned, 1);
-        let summary = store.summary(UsageRange::Day).await.unwrap();
+        let summary = query_summary(&store, UsageRange::Day).await;
         assert_eq!(summary.totals.input_other, 30);
 
         // 截断重建 → 旧事件整批替换，不双计
         std::fs::write(&wire, format!("{}\n", usage_line(now, "m1", 5, 5, 5))).unwrap();
         let report = store.scan_and_record(tmp.path()).await.unwrap();
         assert_eq!(report.files_rescanned, 1);
-        let summary = store.summary(UsageRange::Day).await.unwrap();
+        let summary = query_summary(&store, UsageRange::Day).await;
         assert_eq!(summary.totals.input_other, 5);
         assert_eq!(summary.totals.output, 5);
     }
@@ -217,7 +217,7 @@ mod tests {
         let (r1, r2) = (r1.unwrap(), r2.unwrap());
         assert_eq!(r1.events_added + r2.events_added, 3);
 
-        let summary = store.summary(UsageRange::Day).await.unwrap();
+        let summary = query_summary(&store, UsageRange::Day).await;
         assert_eq!(summary.totals.input_other, 60);
         assert_eq!(summary.totals.output, 6);
     }
@@ -283,14 +283,14 @@ mod tests {
         assert_eq!(report.files_found, 2);
         assert_eq!(report.files_failed, 1);
         assert_eq!(report.events_added, 1);
-        let summary = store.summary(UsageRange::Day).await.unwrap();
+        let summary = query_summary(&store, UsageRange::Day).await;
         assert_eq!(summary.totals.input_other, 1);
 
         // 释放占用后重扫：失败文件自然补回
         drop(lock);
         let report = store.scan_and_record(tmp.path()).await.unwrap();
         assert_eq!(report.files_failed, 0);
-        let summary = store.summary(UsageRange::Day).await.unwrap();
+        let summary = query_summary(&store, UsageRange::Day).await;
         assert_eq!(summary.totals.input_other, 3);
     }
 
@@ -316,11 +316,11 @@ mod tests {
         store.scan_and_record(tmp.path()).await.unwrap();
 
         // 最近 5 小时只含 recent
-        let last5 = store.summary(UsageRange::Last5Hours).await.unwrap();
+        let last5 = query_summary(&store, UsageRange::Last5Hours).await;
         assert_eq!(last5.totals.input_other, 100);
 
         // 当月范围：月初 1 号 0~6 点跑测试时 six_hours_ago 落在上月，按边界分支断言
-        let month = store.summary(UsageRange::Month).await.unwrap();
+        let month = query_summary(&store, UsageRange::Month).await;
         let same_month = chrono::Local
             .timestamp_millis_opt(six_hours_ago)
             .single()
@@ -329,7 +329,7 @@ mod tests {
         let expected = if same_month { 300 } else { 100 };
         assert_eq!(month.totals.input_other, expected);
 
-        let day = store.summary(UsageRange::Day).await.unwrap();
+        let day = query_summary(&store, UsageRange::Day).await;
         let same_day = chrono::Local
             .timestamp_millis_opt(six_hours_ago)
             .single()
@@ -362,7 +362,7 @@ mod tests {
         );
         store.scan_and_record(tmp.path()).await.unwrap();
 
-        let by_project = store.usage_by_project(UsageRange::Day).await.unwrap();
+        let by_project = query_by_project(&store, UsageRange::Day).await;
         assert_eq!(by_project.len(), 2);
         // 按 input_other 降序：blog(200) 在前，app(150) 在后
         assert_eq!(by_project[0].key, "blog");
@@ -370,7 +370,7 @@ mod tests {
         assert_eq!(by_project[1].key, "app");
         assert_eq!(by_project[1].totals.input_other, 150);
 
-        let by_model = store.usage_by_model(UsageRange::Day).await.unwrap();
+        let by_model = query_by_model(&store, UsageRange::Day).await;
         assert_eq!(by_model.len(), 2);
         assert_eq!(by_model[0].key, "m1");
         assert_eq!(by_model[0].totals.input_other, 300);
@@ -392,7 +392,7 @@ mod tests {
             &[usage_line(now, "m1", 0, 42, 0)],
         );
         store.scan_and_record(tmp.path()).await.unwrap();
-        let summary = store.summary(UsageRange::Day).await.unwrap();
+        let summary = query_summary(&store, UsageRange::Day).await;
         assert_eq!(summary.totals.cache_hit_rate, None);
         assert_eq!(summary.totals.output, 42);
     }
@@ -414,7 +414,7 @@ mod tests {
         );
         store.scan_and_record(tmp.path()).await.unwrap();
 
-        let day = store.usage_series(UsageRange::Day).await.unwrap();
+        let day = query_series(&store, UsageRange::Day).await;
         let same_day = chrono::Local
             .timestamp_millis_opt(now - 2 * 3600 * 1000)
             .single()
@@ -424,7 +424,7 @@ mod tests {
         assert_eq!(day.points.len(), if same_day { 2 } else { 1 });
         assert!(day.points.iter().all(|p| p.bucket.len() == 5));
 
-        let month = store.usage_series(UsageRange::Month).await.unwrap();
+        let month = query_series(&store, UsageRange::Month).await;
         assert!(!month.points.is_empty());
         // 月末桶即今天（本地日期）
         let today = Local::now().format("%Y-%m-%d").to_string();

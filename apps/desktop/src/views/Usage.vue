@@ -46,7 +46,7 @@ onMounted(() => usage.init(settings.kimiSessionsDir || undefined))
               }}
             </template>
           </template>
-          <template v-else>正在后台扫描日志…</template>
+          <template v-else-if="usage.scanning">正在后台扫描日志…</template>
         </p>
       </div>
       <Button

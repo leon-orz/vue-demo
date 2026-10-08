@@ -1,14 +1,13 @@
 //! 用量聚合（M1）数据模型。字段与《02-开发计划》M1 节数据表设计对齐，
 //! 对应 migration 0003 的 log_file / usage_event / usage_daily / quota_snapshot / platform_account。
-//! 2026-10-02 决策：M1 当前只统计 Kimi Code，Platform 收缩为单一平台（其他平台待回归时
-//! 从 git 历史恢复）；schema 与命令层的 platform 维度保持泛化不动。
+//! M1 当前只统计 Kimi Code，Platform 为单一平台；schema 与命令层的 platform 维度保持泛化不动。
 //! TS 类型由 ts-rs 生成到 packages/core-types/bindings/，禁止手改生成物。
 
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 /// 用量来源平台。序列化为小写字符串，与数据表 platform 列取值一致。
-/// 当前只有 Kimi；枚举保留以便后续平台回归（omp/dsh/MiMo 从 git 历史恢复）。
+/// 当前只有 Kimi；枚举保留平台扩展位。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(export, export_to = "../../../packages/core-types/bindings/")]

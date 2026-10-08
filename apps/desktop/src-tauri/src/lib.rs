@@ -30,27 +30,33 @@ pub fn run() {
             commands::subscription::import_share_text,
         ])
         .setup(|app| {
+            // app data 目录只解析一次，四个模块状态共享；解析失败的错误文案也统一
+            let app_data_dir = app
+                .path()
+                .app_data_dir()
+                .map_err(|e| format!("无法解析 app data 目录: {e}"));
+
             // 用量模块状态：初始化失败不 panic，降级为错误态（命令统一返回 unavailable），
             // 应用其余模块照常可用
-            let state = match app.path().app_data_dir() {
+            let state = match &app_data_dir {
                 Ok(dir) => {
-                    match tauri::async_runtime::block_on(commands::usage::UsageState::new(dir)) {
+                    match tauri::async_runtime::block_on(commands::usage::UsageState::new(
+                        dir.clone(),
+                    )) {
                         Ok(state) => state,
                         Err(e) => commands::usage::UsageState::unavailable(e),
                     }
                 }
-                Err(e) => {
-                    commands::usage::UsageState::unavailable(format!("无法解析 app data 目录: {e}"))
-                }
+                Err(e) => commands::usage::UsageState::unavailable(e.clone()),
             };
             app.manage(state);
 
             // S1-3：拉起 mihomo sidecar（端口顺延 + 首跑配置生成 + 失败降级，见 sidecar.rs）。
-            let proxy_state = match app.path().app_data_dir() {
-                Ok(dir) => tauri::async_runtime::block_on(sidecar::start(app.handle(), dir)),
-                Err(e) => {
-                    sidecar::ProxyCoreState::unavailable(format!("无法解析 app data 目录: {e}"))
+            let proxy_state = match &app_data_dir {
+                Ok(dir) => {
+                    tauri::async_runtime::block_on(sidecar::start(app.handle(), dir.clone()))
                 }
+                Err(e) => sidecar::ProxyCoreState::unavailable(e.clone()),
             };
             app.manage(proxy_state);
 
@@ -60,24 +66,20 @@ pub fn run() {
             // 自检改为首个 proxy_status / set_system_proxy 调用时经 spawn_blocking
             // 惰性执行一次（见 ProxyCommandState::ensure_startup_check），结果经
             // proxy_status 暴露给前端；恢复由前端确认后调 recover_system_proxy
-            let proxy_cmd_state = match app.path().app_data_dir() {
-                Ok(dir) => {
-                    tauri::async_runtime::block_on(commands::proxy::ProxyCommandState::new(dir))
-                }
-                Err(e) => commands::proxy::ProxyCommandState::unavailable(format!(
-                    "无法解析 app data 目录: {e}"
+            let proxy_cmd_state = match &app_data_dir {
+                Ok(dir) => tauri::async_runtime::block_on(commands::proxy::ProxyCommandState::new(
+                    dir.clone(),
                 )),
+                Err(e) => commands::proxy::ProxyCommandState::unavailable(e.clone()),
             };
             app.manage(proxy_cmd_state);
 
             // M5-07：订阅命令层状态（proxy_setting KV + mihomo 工作目录路径 + 更新互斥标志）。
-            let subscription_state = match app.path().app_data_dir() {
+            let subscription_state = match &app_data_dir {
                 Ok(dir) => tauri::async_runtime::block_on(
-                    commands::subscription::SubscriptionCommandState::new(dir),
+                    commands::subscription::SubscriptionCommandState::new(dir.clone()),
                 ),
-                Err(e) => commands::subscription::SubscriptionCommandState::unavailable(format!(
-                    "无法解析 app data 目录: {e}"
-                )),
+                Err(e) => commands::subscription::SubscriptionCommandState::unavailable(e.clone()),
             };
             // 订阅定时更新（24h）：sidecar 就绪与否由任务内部探测（端口/secret 从
             // proxy_setting 自取），未运行只记 last_error 跳过本次，不影响任务存活

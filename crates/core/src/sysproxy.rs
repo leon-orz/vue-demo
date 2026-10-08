@@ -65,14 +65,23 @@ pub trait ProxyStateStore: Send + Sync {
 }
 
 /// 系统代理管理器：组合注册表 IO 与状态持久化，向上提供开/关/自检/恢复。
+/// enable/disable/startup_check 经内部互斥锁串行化：命令层在 spawn_blocking
+/// 线程池里真并行，两个并发 enable 的 load→read→save 若交错会把「开启态」
+/// 存成 previous 假现场，之后 disable 会把系统代理锁死在开启。
 pub struct SystemProxyManager<R: RegistryIo, S: ProxyStateStore> {
     reg: R,
     store: S,
+    /// 状态变更操作串行化锁（方法都是同步的，锁内只做注册表/存储 IO，代价极小）
+    op_lock: std::sync::Mutex<()>,
 }
 
 impl<R: RegistryIo, S: ProxyStateStore> SystemProxyManager<R, S> {
     pub fn new(reg: R, store: S) -> Self {
-        Self { reg, store }
+        Self {
+            reg,
+            store,
+            op_lock: std::sync::Mutex::new(()),
+        }
     }
 
     /// 当前系统代理真实状态（直接读注册表，不读本软件记录）
@@ -83,6 +92,7 @@ impl<R: RegistryIo, S: ProxyStateStore> SystemProxyManager<R, S> {
     /// 开启系统代理：首次开启前保存旧值（已有备份则不覆盖，保留最初现场），
     /// 然后写 ProxyEnable=1 + ProxyServer 并广播系统通知。
     pub fn enable(&self, server: &str) -> Result<(), SysProxyError> {
+        let _guard = self.lock_op();
         if self.store.load()?.is_none() {
             let previous = self.reg.read()?;
             self.store.save(&ProxyBackupState { previous })?;
@@ -94,6 +104,7 @@ impl<R: RegistryIo, S: ProxyStateStore> SystemProxyManager<R, S> {
     /// 关闭系统代理：若现场由本软件开启（有备份）则还原旧值并清除备份；
     /// 否则仅置 ProxyEnable=0（不动 ProxyServer，保留用户既有配置）。
     pub fn disable(&self) -> Result<(), SysProxyError> {
+        let _guard = self.lock_op();
         match self.store.load()? {
             Some(backup) => {
                 self.reg.restore(&backup.previous)?;
@@ -108,6 +119,7 @@ impl<R: RegistryIo, S: ProxyStateStore> SystemProxyManager<R, S> {
     /// 有备份且注册表仍开着 → leftover=true（供上层提示并调 [`Self::recover`] 恢复）；
     /// 有备份但注册表已关 → 备份失效（用户/系统已自行关闭），静默清除备份。
     pub fn startup_check(&self) -> Result<SystemProxyCheck, SysProxyError> {
+        let _guard = self.lock_op();
         let current = self.reg.read()?;
         match self.store.load()? {
             Some(backup) if current.enabled => Ok(SystemProxyCheck {
@@ -135,6 +147,11 @@ impl<R: RegistryIo, S: ProxyStateStore> SystemProxyManager<R, S> {
     /// 与 disable 同逻辑（有备份即还原），由上层在 startup_check 报 leftover 后调用。
     pub fn recover(&self) -> Result<(), SysProxyError> {
         self.disable()
+    }
+
+    /// 取操作锁；中毒（持锁线程 panic）时取回守卫继续——锁只为串行化，不为完整性断言
+    fn lock_op(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.op_lock.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -481,5 +498,73 @@ mod tests {
         assert!(matches!(err, SysProxyError::Registry(_)));
         // 备份已保存（现场仍在），下次启动自检可感知
         assert!(store.has_state());
+    }
+
+    /// 读延迟注入的注册表 mock：拉大 enable 的 load→read→save 竞态窗口
+    #[derive(Clone)]
+    struct SlowReadReg {
+        inner: MemReg,
+        delay: std::time::Duration,
+    }
+
+    impl RegistryIo for SlowReadReg {
+        fn read(&self) -> Result<SystemProxyStatus, SysProxyError> {
+            std::thread::sleep(self.delay);
+            self.inner.read()
+        }
+
+        fn write(&self, enabled: bool, server: Option<&str>) -> Result<(), SysProxyError> {
+            self.inner.write(enabled, server)
+        }
+
+        fn restore(&self, status: &SystemProxyStatus) -> Result<(), SysProxyError> {
+            self.inner.restore(status)
+        }
+
+        fn notify_change(&self) -> Result<(), SysProxyError> {
+            self.inner.notify_change()
+        }
+    }
+
+    /// 并发 enable 串行化语义：8 个线程同时 enable（mock 读带延迟，无 op_lock 时
+    /// load→read→save 必交错出「把开启态存成 previous」的假现场），最终备份里的
+    /// previous 必须是开启前的原始状态，disable 后无损还原
+    #[test]
+    fn concurrent_enables_are_serialized_and_keep_original_backup() {
+        let reg = SlowReadReg {
+            inner: MemReg::new(),
+            delay: std::time::Duration::from_millis(20),
+        };
+        let store = MemStore::default();
+        let m = Arc::new(SystemProxyManager::new(reg.clone(), store.clone()));
+        let mut handles = Vec::new();
+        for i in 0..8u16 {
+            let m = Arc::clone(&m);
+            handles.push(std::thread::spawn(move || {
+                m.enable(&format!("127.0.0.1:{}", 7890 + i)).unwrap();
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        // 只有首个 enable 存现场，且一定是开启前的原始状态（关闭、无 ProxyServer）
+        let backup = store.state.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            backup.previous,
+            SystemProxyStatus {
+                enabled: false,
+                server: None
+            }
+        );
+        assert!(reg.inner.snapshot().enabled);
+        // 关闭后无损还原到原始状态（而非锁死在某个开启态）
+        m.disable().unwrap();
+        assert_eq!(
+            reg.inner.snapshot(),
+            SystemProxyStatus {
+                enabled: false,
+                server: None
+            }
+        );
     }
 }

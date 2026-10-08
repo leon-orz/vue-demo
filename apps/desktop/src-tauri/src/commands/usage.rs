@@ -46,7 +46,7 @@ fn keyring() -> KeyringStore {
     KeyringStore::new(KEYRING_SERVICE_NAME)
 }
 
-/// 手动触发增量扫描（启动时与定时任务复用同一逻辑；各 store 内互斥锁防并发双计）。
+/// 手动触发增量扫描（入口为前端用量页初始化与「重新扫描」按钮；各 store 内互斥锁防并发双计）。
 /// platform 不传 = 全部有日志的平台（当前只有 kimi）；
 /// 单平台失败不影响其他平台，各自结果/错误体现在返回值的每个元素里。
 /// sessions_dir 为 Kimi 日志目录覆盖（M6 设置项），只作用于 kimi 平台。

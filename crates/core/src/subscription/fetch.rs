@@ -37,7 +37,7 @@ pub fn validate_subscription_url(url: &str) -> Result<String, SubscriptionError>
 }
 
 /// 拉取订阅内容：GET 指定 URL，超时 15s，UA 伪装成 Clash 系客户端。
-/// 非 2xx → Fetch("HTTP {status}")；网络错误（连接失败/超时等）→ Fetch。
+/// 非 2xx → FetchHttp(status)；网络错误（连接失败/超时等）→ Fetch。
 pub async fn fetch_subscription(url: &str) -> Result<String, SubscriptionError> {
     fetch_with_timeout(url, FETCH_TIMEOUT).await
 }
@@ -58,7 +58,7 @@ async fn fetch_with_timeout(url: &str, timeout: Duration) -> Result<String, Subs
         .map_err(|e| SubscriptionError::Fetch(e.to_string()))?;
     let status = resp.status();
     if !status.is_success() {
-        return Err(SubscriptionError::Fetch(format!("HTTP {status}")));
+        return Err(SubscriptionError::FetchHttp(status.as_u16()));
     }
     resp.text()
         .await
@@ -123,7 +123,7 @@ mod tests {
             .mount(&server)
             .await;
         let err = fetch_subscription(&server.uri()).await.unwrap_err();
-        assert!(matches!(err, SubscriptionError::Fetch(_)));
+        assert!(matches!(err, SubscriptionError::FetchHttp(404)));
         assert!(err.to_string().contains("404"));
 
         let server = MockServer::start().await;
@@ -132,6 +132,7 @@ mod tests {
             .mount(&server)
             .await;
         let err = fetch_subscription(&server.uri()).await.unwrap_err();
+        assert!(matches!(err, SubscriptionError::FetchHttp(401)));
         assert!(err.to_string().contains("401"));
     }
 

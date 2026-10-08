@@ -45,34 +45,6 @@ afterEach(() => {
   document.documentElement.classList.remove('dark')
 })
 
-describe('applyTheme 对 document 的实际效果', () => {
-  it('dark 加 dark class，light 移除', () => {
-    stubMatchMedia(false)
-    const store = useSettingsStore()
-
-    store.theme = 'dark'
-    store.applyTheme()
-    expect(document.documentElement.classList.contains('dark')).toBe(true)
-
-    store.theme = 'light'
-    store.applyTheme()
-    expect(document.documentElement.classList.contains('dark')).toBe(false)
-  })
-
-  it('system 模式跟随 matchMedia 的 matches', () => {
-    const media = stubMatchMedia(true)
-    const store = useSettingsStore()
-    store.theme = 'system'
-
-    store.applyTheme()
-    expect(document.documentElement.classList.contains('dark')).toBe(true)
-
-    media.setDark(false)
-    store.applyTheme()
-    expect(document.documentElement.classList.contains('dark')).toBe(false)
-  })
-})
-
 describe('系统主题监听器', () => {
   it('init 注册 change 监听，system 模式下系统主题变化自动重应用', () => {
     const media = stubMatchMedia(false)

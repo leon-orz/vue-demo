@@ -31,7 +31,11 @@ pub struct LogStore {
     pool: SqlitePool,
     platform: Platform,
     cli: &'static str,
-    /// 扫描互斥锁：并发触发（手动 + 定时任务）时排队执行，避免并发扫描双计入库
+    /// 扫描互斥锁：并发触发（手动 + 定时任务）时排队执行。
+    /// 只保证同一 LogStore 实例（共享同一 Arc<Mutex>）内的扫描串行、不双计入库；
+    /// 跨实例（各自持有独立锁）不互斥——两个实例并发首扫时 truncated=false 的追加路径
+    /// 理论上会双计（INSERT 不去重）。当前生产只有 UsageService 单例持有一个 store，
+    /// 无实际风险；若将来引入多实例需把互斥上提到进程级。
     scan_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -72,7 +76,8 @@ impl LogStore {
         self.pool.close().await;
     }
 
-    /// 连接池访问：薄壳 store 的聚合查询委托（usage::query）与测试断言用
+    /// 连接池访问：仅测试用（薄壳 store 的测试直接调 usage::query 需要池句柄）
+    #[cfg(test)]
     pub(crate) fn pool(&self) -> &SqlitePool {
         &self.pool
     }
@@ -100,7 +105,8 @@ impl LogStore {
 
     /// 扫描并入库：重扫 → 写事件 → 按需重算日聚合，全程幂等。
     /// `scan` 为平台的扫描函数（crate::logs::scanner::scan 装好收集规则与行解析回调）。
-    /// 并发调用经互斥锁排队，保证不会双计入库。
+    /// scan 是同步阻塞的文件 IO，经 spawn_blocking 挪出 runtime 工作线程；
+    /// 并发调用经互斥锁排队（适用范围见 scan_lock 字段注释）。
     pub async fn scan_and_record(
         &self,
         sessions_root: &Path,
@@ -108,7 +114,10 @@ impl LogStore {
     ) -> Result<ScanReport, LogError> {
         let _guard = self.scan_lock.lock().await;
         let cursors = self.load_cursors().await?;
-        let output = scan(sessions_root, &cursors)?;
+        let sessions_root = sessions_root.to_path_buf();
+        let output = tokio::task::spawn_blocking(move || scan(&sessions_root, &cursors))
+            .await
+            .expect("日志扫描线程 panic")?;
         self.record(output).await
     }
 
@@ -119,13 +128,14 @@ impl LogStore {
         let mut tx = self.pool.begin().await?;
         for file in &output.files {
             let path = file.path.to_string_lossy();
-            // upsert 游标行（platform + path 联合唯一）
-            sqlx::query(
+            // upsert 游标行并直接取回 id（platform + path 联合唯一）
+            let (log_file_id,): (i64,) = sqlx::query_as(
                 "INSERT INTO log_file (platform, path, offset, size, mtime, last_scanned_at)
                  VALUES (?, ?, ?, ?, ?, ?)
                  ON CONFLICT(platform, path) DO UPDATE SET
                      offset = excluded.offset, size = excluded.size,
-                     mtime = excluded.mtime, last_scanned_at = excluded.last_scanned_at",
+                     mtime = excluded.mtime, last_scanned_at = excluded.last_scanned_at
+                 RETURNING id",
             )
             .bind(self.platform.as_str())
             .bind(path.as_ref())
@@ -133,14 +143,8 @@ impl LogStore {
             .bind(file.size as i64)
             .bind(file.mtime)
             .bind(&now)
-            .execute(&mut *tx)
+            .fetch_one(&mut *tx)
             .await?;
-            let (log_file_id,): (i64,) =
-                sqlx::query_as("SELECT id FROM log_file WHERE platform = ? AND path = ?")
-                    .bind(self.platform.as_str())
-                    .bind(path.as_ref())
-                    .fetch_one(&mut *tx)
-                    .await?;
             if file.truncated {
                 // 文件被截断/重建/改写：整批删除旧事件后按重扫结果重建
                 sqlx::query("DELETE FROM usage_event WHERE log_file_id = ?")

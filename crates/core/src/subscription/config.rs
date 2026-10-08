@@ -19,10 +19,9 @@ pub const NODES_FILE_NAME: &str = "toogl-nodes.yaml";
 /// 托管节点文件头注释（每次重写都带上，提示用户不要手改）
 const NODES_FILE_HEADER: &str = "# 本文件由 Toogl 托管，请勿手改\n";
 
-/// 本工具首跑配置模板标记（复制自 apps/desktop/src-tauri/src/sidecar.rs 的
-/// TEMPLATE_MARKER，两边必须保持一致）：据此区分「本工具模板（可自动接线）」
-/// 与「用户手写配置（不动）」
-const TEMPLATE_MARKER: &str = "本文件由 Toogl 首次运行自动生成";
+/// 本工具首跑配置模板标记（单一来源；sidecar.rs 首跑模板头注释与本处接线判断
+/// 共用此常量）：据此区分「本工具模板（可自动接线/自动升级）」与「用户手写配置（不动）」
+pub const TEMPLATE_MARKER: &str = "本文件由 Toogl 首次运行自动生成";
 
 /// proxy-providers 下本工具占用的 provider 名
 const PROVIDER_NAME: &str = "toogl";
@@ -30,8 +29,23 @@ const PROVIDER_NAME: &str = "toogl";
 /// 接线目标代理组名（首跑模板里的 Selector 骨架组）
 const TARGET_GROUP: &str = "节点选择";
 
+/// tmp+rename 原子写（避免 mihomo 读到半截文件）：tmp 文件与目标同目录，
+/// 保证 rename 不跨文件系统
+fn atomic_write(path: &Path, content: &str) -> Result<(), SubscriptionError> {
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| SubscriptionError::Io(format!("文件路径非法: {}", path.display())))?;
+    let tmp = path.with_file_name(format!("{file_name}.tmp"));
+    std::fs::write(&tmp, content)
+        .map_err(|e| SubscriptionError::Io(format!("文件写入失败（{}）: {e}", tmp.display())))?;
+    std::fs::rename(&tmp, path)
+        .map_err(|e| SubscriptionError::Io(format!("文件替换失败（{}）: {e}", path.display())))?;
+    Ok(())
+}
+
 /// 写托管节点文件：内容为注释头 + `proxies: [...]`（serde_yaml 序列化），
-/// 先写 tmp 再 rename 原子替换（避免 mihomo 读到半截文件）。空列表也写（`proxies: []`）。
+/// tmp+rename 原子替换（见 atomic_write）。空列表也写（`proxies: []`）。
 /// 返回写入的文件路径。
 pub fn write_nodes_file(work_dir: &Path, nodes: &[Mapping]) -> Result<PathBuf, SubscriptionError> {
     let mut root = Mapping::new();
@@ -42,11 +56,7 @@ pub fn write_nodes_file(work_dir: &Path, nodes: &[Mapping]) -> Result<PathBuf, S
     let body = serde_yaml::to_string(&Value::Mapping(root))
         .map_err(|e| SubscriptionError::Io(format!("节点文件序列化失败: {e}")))?;
     let path = work_dir.join(NODES_FILE_NAME);
-    let tmp = work_dir.join(format!("{NODES_FILE_NAME}.tmp"));
-    std::fs::write(&tmp, format!("{NODES_FILE_HEADER}{body}"))
-        .map_err(|e| SubscriptionError::Io(format!("节点文件写入失败: {e}")))?;
-    std::fs::rename(&tmp, &path)
-        .map_err(|e| SubscriptionError::Io(format!("节点文件替换失败: {e}")))?;
+    atomic_write(&path, &format!("{NODES_FILE_HEADER}{body}"))?;
     Ok(path)
 }
 
@@ -56,14 +66,7 @@ pub fn write_nodes_file(work_dir: &Path, nodes: &[Mapping]) -> Result<PathBuf, S
 pub fn restore_nodes_file(work_dir: &Path, content: Option<&str>) -> Result<(), SubscriptionError> {
     let path = work_dir.join(NODES_FILE_NAME);
     match content {
-        Some(content) => {
-            let tmp = work_dir.join(format!("{NODES_FILE_NAME}.tmp"));
-            std::fs::write(&tmp, content)
-                .map_err(|e| SubscriptionError::Io(format!("节点文件回滚写入失败: {e}")))?;
-            std::fs::rename(&tmp, &path)
-                .map_err(|e| SubscriptionError::Io(format!("节点文件回滚替换失败: {e}")))?;
-            Ok(())
-        }
+        Some(content) => atomic_write(&path, content),
         None => match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -107,13 +110,13 @@ pub fn ensure_wired(config_path: &Path) -> Result<bool, SubscriptionError> {
     let body = serde_yaml::to_string(&Value::Mapping(doc))
         .map_err(|e| SubscriptionError::Io(format!("config.yaml 序列化失败: {e}")))?;
 
-    // 先备份再写回：正常流程接线只发生一次，备份即用户可回滚的接线前版本；
+    // 先备份再原子写回（tmp+rename，避免 mihomo 读到半截文件）：
+    // 正常流程接线只发生一次，备份即用户可回滚的接线前版本；
     // 若用户手工拆除接线后再次触发自动接线，旧备份会被当时的内容覆盖
     let backup = config_path.with_extension("yaml.bak");
     std::fs::copy(config_path, &backup)
         .map_err(|e| SubscriptionError::Io(format!("config.yaml 备份失败: {e}")))?;
-    std::fs::write(config_path, format!("{marker_line}\n{body}"))
-        .map_err(|e| SubscriptionError::Io(format!("config.yaml 写回失败: {e}")))?;
+    atomic_write(config_path, &format!("{marker_line}\n{body}"))?;
     Ok(true)
 }
 

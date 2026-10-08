@@ -38,8 +38,8 @@ pub struct ProxyCommandState {
     /// recover/set_system_proxy(false) 成功后清除）。
     /// 自检有副作用（静默清理失效备份），不适合在 proxy_status 里反复跑，故缓存。
     startup_check: Mutex<Option<SystemProxyCheck>>,
-    /// 保证启动自检全局只跑一次（见 ensure_startup_check）
-    startup_check_once: tokio::sync::OnceCell<()>,
+    /// 保证启动自检全局只成功跑一次（见 ensure_startup_check；失败不缓存，下次调用重试）
+    startup_check_once: tokio::sync::OnceCell<SystemProxyCheck>,
     /// 系统代理开关指向的本地 mixed 端口（取值优先级见 sidecar::resolve_mixed_port：
     /// proxy_setting 持久化值 → config.yaml → 常量 7890）
     mixed_port: u16,
@@ -105,8 +105,9 @@ impl ProxyCommandState {
         })
     }
 
-    /// 惰性启动自检：首个 proxy_status / set_system_proxy 调用时执行一次并缓存结果
-    ///（OnceCell 保证只跑一次；自检有清失效备份的副作用，不能反复跑）。
+    /// 惰性启动自检：首个 proxy_status / set_system_proxy 调用时执行并缓存结果。
+    /// 用 OnceCell::get_or_try_init：**成功才缓存**——自检任务 join 失败或
+    /// startup_check 报错不写入缓存，下次调用重试（一次失败不再永久放弃）。
     /// 识别"上次异常退出残留的系统代理开启"，结果经 proxy_status 暴露给前端；
     /// 恢复由前端确认后调 recover_system_proxy。
     /// 必须在异步命令上下文调用：manager 同步方法经 spawn_blocking 进 blocking 线程池，
@@ -115,27 +116,26 @@ impl ProxyCommandState {
         let Some(manager) = self.sysproxy.clone() else {
             return;
         };
-        self.startup_check_once
-            .get_or_init(|| async move {
-                let check = tauri::async_runtime::spawn_blocking(move || manager.startup_check())
+        let result = self
+            .startup_check_once
+            .get_or_try_init(|| async move {
+                tauri::async_runtime::spawn_blocking(move || manager.startup_check())
                     .await
-                    .map_err(|e| eprintln!("[proxy] 系统代理启动自检任务失败: {e}"))
-                    .ok()
-                    .and_then(|r| match r {
-                        Ok(check) => Some(check),
-                        Err(e) => {
-                            eprintln!("[proxy] 系统代理启动自检失败（按无残留处理）: {e}");
-                            None
-                        }
-                    });
-                if check.as_ref().is_some_and(|c| c.leftover) {
+                    .map_err(|e| format!("自检任务执行失败: {e}"))?
+                    .map_err(|e| e.to_string())
+            })
+            .await;
+        match result {
+            Ok(check) => {
+                if check.leftover {
                     eprintln!("[proxy] 检测到上次异常退出的系统代理残留，等待前端确认恢复");
                 }
                 if let Ok(mut g) = self.startup_check.lock() {
-                    *g = check;
+                    *g = Some(check.clone());
                 }
-            })
-            .await;
+            }
+            Err(e) => eprintln!("[proxy] 系统代理启动自检失败（按无残留处理，下次调用重试）: {e}"),
+        }
     }
 
     /// 缓存的启动自检残留标记（proxy_status 暴露用）
@@ -170,12 +170,10 @@ impl ProxyCommandState {
     }
 }
 
-/// MihomoError → CommandError：不可达归 network，其余归 internal
+/// MihomoError → CommandError（映射规则在 core 侧 `From<MihomoError>` 实现：
+/// 不可达归 network，其余归 internal）
 pub(crate) fn mihomo_err(e: MihomoError) -> CommandError {
-    match e {
-        MihomoError::Unreachable(m) => CommandError::network(m),
-        MihomoError::Api(m) | MihomoError::Parse(m) => CommandError::internal(m),
-    }
+    e.into()
 }
 
 /// M5 状态总览：sidecar 存活/端口/启动错误 + mihomo /proxies 摘要 + 规则模式 +
@@ -311,11 +309,24 @@ pub async fn test_delay(
 /// 语义（core::sysproxy）：开启仅在无备份时保存旧现场；关闭有备份精确还原、
 /// 无备份只清 ProxyEnable。注册表为同步 IO，经 spawn_blocking 执行。
 /// 开启前先确保启动自检已跑：其副作用会清理失效备份，避免旧备份挡住本次现场保存。
+/// 开启前校验 sidecar 存活：sidecar 未运行直接返回结构化错误，
+/// 不把全网流量指向死端口。
 #[tauri::command]
 pub async fn set_system_proxy(
     state: State<'_, ProxyCommandState>,
+    core: State<'_, ProxyCoreState>,
     enabled: bool,
 ) -> Result<(), CommandError> {
+    if enabled && !core.alive().await {
+        return Err(match core.startup_error() {
+            Some(reason) => CommandError::unavailable(format!(
+                "mihomo sidecar 未运行，无法开启系统代理: {reason}"
+            )),
+            None => {
+                CommandError::network("mihomo sidecar 未运行（存活探测无应答），无法开启系统代理")
+            }
+        });
+    }
     state.ensure_startup_check().await;
     let manager = state.require_sysproxy()?;
     let server = format!("127.0.0.1:{}", state.mixed_port);

@@ -106,6 +106,8 @@ export const useUsageStore = defineStore('usage', () => {
   const initialized = ref(false)
   /** 初始化/聚合加载失败原因；非空时页面显示错误横幅，可重试 */
   const loadError = ref<CommandError | null>(null)
+  /** 进行中的初始化 Promise：并发 init 复用同一次初始化，防止快速切路由双跑 */
+  let initializing: Promise<void> | null = null
   /**
    * 聚合数据（series / byProject / byModel）写请求序号：loadAggregates 与 setTrendRange 共用。
    * 每个发起点 bump、落地前校验，快速切过滤 / 切范围时慢的旧响应直接丢弃，不覆盖新数据。
@@ -252,14 +254,23 @@ export const useUsageStore = defineStore('usage', () => {
    * 页面打开入口：先用 SQLite 缓存数据渲染（快照/聚合均为本地读），
    * 再后台触发增量扫描，扫完自动刷新聚合（不阻塞界面）。
    * 任一加载失败时错误进 loadError，initialized 回滚为 false，允许页面重试。
+   * 并发调用复用进行中的同一次初始化（快速切路由不会双跑）。
    */
   async function init(sessionsDir?: string) {
     if (initialized.value) return
-    loadError.value = null
-    await Promise.all([loadAccounts(), loadLatestQuotas(), loadAggregates()])
-    if (loadError.value) return
-    initialized.value = true
-    void scan(sessionsDir)
+    if (initializing) return initializing
+    initializing = (async () => {
+      loadError.value = null
+      await Promise.all([loadAccounts(), loadLatestQuotas(), loadAggregates()])
+      if (loadError.value) return
+      initialized.value = true
+      void scan(sessionsDir)
+    })()
+    try {
+      await initializing
+    } finally {
+      initializing = null
+    }
   }
 
   /** 错误横幅的重试入口：先清空错误，未初始化走 init，已初始化只重取聚合 */
@@ -271,7 +282,6 @@ export const useUsageStore = defineStore('usage', () => {
 
   return {
     activeFilter,
-    summaries,
     trendRange,
     series,
     byProject,
@@ -295,7 +305,6 @@ export const useUsageStore = defineStore('usage', () => {
     setActiveFilter,
     setTrendRange,
     scan,
-    loadLatestQuotas,
     refreshQuota,
     loadAccounts,
     saveAccount,

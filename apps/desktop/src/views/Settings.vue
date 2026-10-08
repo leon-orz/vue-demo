@@ -13,8 +13,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { Separator } from '@/components/ui/separator'
 import { toCommandError } from '@/api/errors'
+import LoadErrorBanner from '@/components/LoadErrorBanner.vue'
 import { useSettingsStore, type ThemeMode } from '@/stores/settings'
 import { useUsageStore } from '@/stores/usage'
 
@@ -35,14 +35,23 @@ const themeOptions: { value: ThemeMode; label: string }[] = [
   { value: 'system', label: '跟随系统' },
 ]
 
-onMounted(async () => {
+/**
+ * 加载 Kimi 账户配置并回填表单。
+ * 失败时 loadError 非空：页面渲染错误横幅并禁用保存，
+ * 避免用户把空表单当「未配置」保存、以默认值覆盖真实配置。
+ */
+async function reloadAccounts() {
+  usage.loadError = null
   await usage.loadAccounts()
+  if (usage.loadError) return
   const account = usage.accounts.kimi
   if (account) {
     kimiForm.name = account.name
     kimiForm.apiBase = account.api_base ?? ''
   }
-})
+}
+
+onMounted(reloadAccounts)
 
 async function saveKimiAccount() {
   kimiSaving.value = true
@@ -81,6 +90,9 @@ const kimiConfigured = computed(() => usage.accounts.kimi?.has_credential === tr
       <p class="mt-1 text-sm text-muted-foreground">AI 用量平台与通用偏好配置。</p>
     </header>
 
+    <!-- 账户加载失败：显示错误横幅并禁用保存，防止空表单覆盖真实配置 -->
+    <LoadErrorBanner v-if="usage.loadError" :error="usage.loadError" @retry="reloadAccounts" />
+
     <!-- M6-01：AI 用量平台账户（Kimi；其他平台已于 2026-10-02 砍掉，回归时从 git 历史恢复） -->
     <Card>
       <CardHeader>
@@ -117,7 +129,7 @@ const kimiConfigured = computed(() => usage.accounts.kimi?.has_credential === tr
           />
         </div>
         <div class="flex items-center gap-3">
-          <Button :disabled="kimiSaving" @click="saveKimiAccount">
+          <Button :disabled="kimiSaving || usage.loadError !== null" @click="saveKimiAccount">
             {{ kimiSaving ? '保存中…' : '保存' }}
           </Button>
           <span v-if="kimiMessage" class="text-sm text-muted-foreground">{{ kimiMessage }}</span>
@@ -165,10 +177,5 @@ const kimiConfigured = computed(() => usage.accounts.kimi?.has_credential === tr
         />
       </CardContent>
     </Card>
-
-    <Separator />
-    <p class="text-xs text-muted-foreground">
-      数据源模式：{{ settings.datasourceMode }}（S2-2 可切换）
-    </p>
   </div>
 </template>

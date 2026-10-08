@@ -6,7 +6,7 @@
 //! - 行解析回调（一行 → 零或一条 UsageEvent，可在回调内维护会话上下文）
 //! - platform / cli 两个常量
 //!
-//! 2026-10-02 决策后 M1 只剩 Kimi Code，骨架仍按平台泛化保留（后续 omp/dsh/MiMo 回归时复用）。
+//! M1 当前只有 Kimi Code 一路，骨架按平台泛化保留。
 
 pub mod scanner;
 pub mod store;

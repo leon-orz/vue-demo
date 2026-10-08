@@ -64,7 +64,7 @@ function onSelect(nodeName: string) {
               selectable ? 'hover:bg-accent/50' : 'cursor-default',
               node.name === group.now ? 'bg-accent/60' : '',
             ]"
-            :disabled="!selectable || proxy.selecting[`${group.name}/${node.name}`] === true"
+            :disabled="!selectable || proxy.selecting[group.name] === true"
             @click="onSelect(node.name)"
           >
             <Check

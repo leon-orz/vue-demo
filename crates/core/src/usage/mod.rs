@@ -3,7 +3,7 @@
 //!
 //! UsageService 持有单一 SQLite 连接池，kimi 平台的 store 经 from_pool 共享该池
 //! （扫描互斥锁仍在 store 内，防并发双计）。
-//! 2026-10-02 决策：当前只统计 Kimi Code（mimo/omp/deepseek 已砍，待回归时从 git 历史恢复）。
+//! 当前只统计 Kimi Code。
 
 pub mod account;
 pub mod query;

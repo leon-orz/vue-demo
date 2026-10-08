@@ -37,7 +37,7 @@ export const useProxyStore = defineStore('proxy', () => {
 
   /** 测速中分组跟踪：key 为组名，'*' 表示全部测速 */
   const testingGroups = ref<Record<string, boolean>>({})
-  /** 节点切换中（key = `${group}/${node}`），防止重复点击 */
+  /** 节点切换中（key = 组名）：同组同时只允许一个切换，避免并发切换互相回滚 */
   const selecting = ref<Record<string, boolean>>({})
   const switchingMode = ref(false)
   const togglingSystemProxy = ref(false)
@@ -46,6 +46,8 @@ export const useProxyStore = defineStore('proxy', () => {
   const leftoverDismissed = ref(false)
 
   let timer: ReturnType<typeof setInterval> | null = null
+  /** refresh 在飞标记：上一次未完成时跳过本轮，避免慢请求（>4s）逐轮叠加 */
+  let refreshing = false
 
   const groups = computed(() => status.value?.proxies?.groups ?? [])
   /** sidecar 可用 = 存活探测通过且启动无错误；不可用时页面整体降级 */
@@ -59,13 +61,17 @@ export const useProxyStore = defineStore('proxy', () => {
   )
   const testingAll = computed(() => testingGroups.value['*'] === true)
 
-  /** 拉取一次聚合状态；失败只记 loadError，不清空已有状态（保持旧数据可读） */
+  /** 拉取一次聚合状态；失败只记 loadError，不清空已有状态（保持旧数据可读）。在飞则跳过本轮 */
   async function refresh() {
+    if (refreshing) return
+    refreshing = true
     try {
       status.value = await api.proxyStatus()
       loadError.value = null
     } catch (err) {
       loadError.value = toCommandError(err)
+    } finally {
+      refreshing = false
     }
   }
 
@@ -87,24 +93,26 @@ export const useProxyStore = defineStore('proxy', () => {
     }
   }
 
-  /** 切换节点：乐观更新组内 now，失败回滚并记 actionError，成功后立即刷新对齐 */
+  /** 切换节点：乐观更新组内 now，失败回滚并记 actionError，成功后立即刷新对齐；同组防重入 */
   async function selectNode(group: string, node: string) {
-    const key = `${group}/${node}`
-    if (selecting.value[key]) return
+    if (selecting.value[group]) return
     const g = status.value?.proxies?.groups.find((gr) => gr.name === group)
     const prev = g?.now
     if (!g || prev === node) return
-    selecting.value[key] = true
+    selecting.value[group] = true
     actionError.value = null
     g.now = node
     try {
       await api.selectProxy(group, node)
       await refresh()
     } catch (err) {
-      g.now = prev ?? node
+      // 回滚时重读 status（轮询可能已整体替换对象，闭包里的旧 g 已不在树上）；
+      // 仅当页面上仍显示乐观值时才回滚，避免覆盖轮询已对齐的事实源
+      const current = status.value?.proxies?.groups.find((gr) => gr.name === group)
+      if (current && current.now === node) current.now = prev ?? node
       actionError.value = toCommandError(err)
     } finally {
-      delete selecting.value[key]
+      delete selecting.value[group]
     }
   }
 
@@ -211,7 +219,6 @@ export const useProxyStore = defineStore('proxy', () => {
     switchingMode,
     togglingSystemProxy,
     recovering,
-    leftoverDismissed,
     groups,
     sidecarOk,
     leftoverVisible,

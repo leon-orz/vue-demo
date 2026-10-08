@@ -9,8 +9,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use super::{AdapterError, UsageAdapter};
-use crate::models::{Credential, Platform, QuotaSnapshot};
+use super::AdapterError;
 
 pub const DEFAULT_API_BASE: &str = "https://api.moonshot.cn";
 /// Kimi Code 套餐用量接口的默认 base（区别于开放平台余额的 api.moonshot.cn）
@@ -215,72 +214,6 @@ impl KimiAdapter {
             fetched_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         })
     }
-
-    /// 套餐用量 → QuotaSnapshot（统一落 quota_snapshot 表）：
-    /// 月度池填 total/used/remaining（均可空），5h 窗口明细进 detail_json。
-    pub async fn fetch_coding_usages_snapshot(
-        &self,
-        base_url: &str,
-        cred: &Credential,
-    ) -> Result<QuotaSnapshot, AdapterError> {
-        let Credential::ApiKey(key) = cred else {
-            return Err(AdapterError::Parse(
-                "Kimi 套餐用量仅支持 ApiKey 凭据".to_string(),
-            ));
-        };
-        let usages = self.fetch_coding_usages(base_url, key).await?;
-        Ok(QuotaSnapshot {
-            platform: Platform::Kimi,
-            total: usages.month_total,
-            used: usages.month_used,
-            remaining: usages.month_remaining,
-            detail_json: Some(
-                serde_json::json!({
-                    "source": "coding_usages",
-                    "window_used_percent": usages.window_used_percent,
-                    "window_remaining_percent": usages.window_remaining_percent,
-                    "window_reset_at": usages.window_reset_at,
-                })
-                .to_string(),
-            ),
-            fetched_at: usages.fetched_at,
-        })
-    }
-}
-
-impl UsageAdapter for KimiAdapter {
-    fn platform_type(&self) -> &'static str {
-        "kimi"
-    }
-
-    async fn fetch(
-        &self,
-        base_url: &str,
-        cred: &Credential,
-    ) -> Result<QuotaSnapshot, AdapterError> {
-        let Credential::ApiKey(key) = cred else {
-            return Err(AdapterError::Parse(
-                "Kimi 开放平台仅支持 ApiKey 凭据".to_string(),
-            ));
-        };
-        let balance = self.fetch_balance(base_url, key).await?;
-        // 按量余额无总额概念：只填 remaining=available，voucher/cash 分项与币种进 detail_json
-        Ok(QuotaSnapshot {
-            platform: Platform::Kimi,
-            total: None,
-            used: None,
-            remaining: Some(balance.available),
-            detail_json: Some(
-                serde_json::json!({
-                    "voucher": balance.voucher,
-                    "cash": balance.cash,
-                    "currency": "cny",
-                })
-                .to_string(),
-            ),
-            fetched_at: balance.fetched_at,
-        })
-    }
 }
 
 #[cfg(test)]
@@ -320,28 +253,6 @@ mod tests {
         assert_eq!(balance.voucher, 2.0);
         assert_eq!(balance.cash, 8.5);
         assert!(!balance.fetched_at.is_empty());
-    }
-
-    #[tokio::test]
-    async fn maps_to_usage_snapshot_via_trait() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body()))
-            .mount(&server)
-            .await;
-
-        let adapter = KimiAdapter::new();
-        let snap = adapter
-            .fetch(&server.uri(), &Credential::ApiKey("k".into()))
-            .await
-            .unwrap();
-        assert_eq!(adapter.platform_type(), "kimi");
-        assert_eq!(snap.platform, Platform::Kimi);
-        assert_eq!(snap.remaining, Some(10.5));
-        let detail: serde_json::Value =
-            serde_json::from_str(snap.detail_json.as_deref().unwrap()).unwrap();
-        assert_eq!(detail["voucher"], 2.0);
-        assert_eq!(detail["currency"], "cny");
     }
 
     #[tokio::test]
@@ -407,15 +318,6 @@ mod tests {
         assert!(matches!(err, AdapterError::Parse(_)));
     }
 
-    #[tokio::test]
-    async fn cookie_credential_rejected() {
-        let err = KimiAdapter::new()
-            .fetch("http://127.0.0.1:1", &Credential::Cookie("c".into()))
-            .await
-            .unwrap_err();
-        assert!(matches!(err, AdapterError::Parse(_)));
-    }
-
     // ---- /coding/v1/usages（非官方接口，响应格式为推测，由以下 fixture 锁定） ----
 
     fn usages_body() -> serde_json::Value {
@@ -461,28 +363,6 @@ mod tests {
         assert_eq!(usages.month_total, Some(1000.0));
         assert_eq!(usages.month_remaining, Some(700.0));
         assert!(!usages.fetched_at.is_empty());
-    }
-
-    #[tokio::test]
-    async fn coding_usages_snapshot_via_trait_shape() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(usages_body()))
-            .mount(&server)
-            .await;
-
-        let snap = KimiAdapter::new()
-            .fetch_coding_usages_snapshot(&server.uri(), &Credential::ApiKey("k".into()))
-            .await
-            .unwrap();
-        assert_eq!(snap.platform, Platform::Kimi);
-        assert_eq!(snap.total, Some(1000.0));
-        assert_eq!(snap.used, Some(300.0));
-        assert_eq!(snap.remaining, Some(700.0));
-        let detail: serde_json::Value =
-            serde_json::from_str(snap.detail_json.as_deref().unwrap()).unwrap();
-        assert_eq!(detail["source"], "coding_usages");
-        assert_eq!(detail["window_used_percent"], 12.5);
     }
 
     #[tokio::test]

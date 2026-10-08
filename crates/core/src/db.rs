@@ -3,7 +3,9 @@
 //! - SQL 文件放在 crates/core/migrations/，命名 NNNN_description.sql，版本号严格递增、只增不改；
 //! - 每个文件按分号切分逐条执行，因此禁止在字符串字面量中使用分号；
 //! - 所有语句必须幂等（IF NOT EXISTS 等），以兼容历史上未经迁移表登记的既有数据库；
-//!   ALTER TABLE ADD COLUMN 无 IF NOT EXISTS，用 Migration.guard_column 列守卫实现幂等。
+//!   ALTER TABLE ADD COLUMN 无 IF NOT EXISTS，用 Migration.guard_column 列守卫实现幂等；
+//! - 每条迁移的全部语句 + 版本登记放在同一个事务里执行（SQLite DDL 支持事务回滚）：
+//!   中途失败/崩溃整体回滚，重跑从头执行，不会留下「ALTER 已提交但回填未做」的半截状态。
 
 use std::collections::HashSet;
 
@@ -14,8 +16,10 @@ pub struct Migration {
     pub version: i64,
     pub description: &'static str,
     pub sql: &'static str,
-    /// 列级幂等守卫：Some((表, 列)) 时，若该列已存在则整段 SQL 跳过（仍登记版本号）。
-    /// 用于 ALTER TABLE ADD COLUMN 这类无 IF NOT EXISTS 的语句（SQLite 不支持）。
+    /// 列级幂等守卫：Some((表, 列)) 时，若该列已存在则跳过本迁移里的 ALTER TABLE 语句
+    ///（SQLite 的 ADD COLUMN 无 IF NOT EXISTS，重复执行会报错），其余幂等语句（回填等）
+    /// 照常执行——避免「列已存在但回填未做」（历史手工加列 / 旧版非事务迁移崩溃残留）
+    /// 被整体跳过造成静默数据缺失。守卫判断与语句执行在同一事务内完成。
     pub guard_column: Option<(&'static str, &'static str)>,
 }
 
@@ -61,12 +65,14 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 7,
         description: "usage_daily_request_count",
         sql: include_str!("../migrations/0007_usage_daily_request_count.sql"),
-        // request_count 已存在（如历史库手工加过列）则整段跳过，保证 ADD COLUMN 幂等
+        // request_count 已存在（如历史库手工加过列）时跳过 ALTER，回填仍照常执行
         guard_column: Some(("usage_daily", "request_count")),
     },
 ];
 
 /// 按版本号执行未应用过的迁移，并登记到 _toogl_migrations 表。
+/// 每条迁移的全部语句与版本登记在同一事务内执行：失败整体回滚，重跑从头再来，
+/// 不会留下半截状态（如 0007 的 ALTER 已提交但回填未做）。
 /// 语句级幂等兜底：即使登记缺失（如历史库），IF NOT EXISTS 也保证重复执行安全。
 pub async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query(
@@ -87,40 +93,51 @@ pub async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         if applied.contains(&m.version) {
             continue;
         }
-        // 列守卫：目标列已存在时整段跳过（仍登记版本号），
-        // 让 ALTER TABLE ADD COLUMN 这类无 IF NOT EXISTS 的语句在重复执行/历史库上幂等
-        if let Some((table, column)) = m.guard_column {
-            if column_exists(pool, table, column).await? {
-                register_migration(pool, m).await?;
-                continue;
-            }
-        }
+        let mut tx = pool.begin().await?;
+        // 列守卫（事务内判断）：目标列已存在时跳过 ALTER TABLE 语句
+        //（ADD COLUMN 重复执行会报错），其余幂等语句（回填等）照常执行
+        let column_guarded = match m.guard_column {
+            Some((table, column)) => column_exists(&mut tx, table, column).await?,
+            None => false,
+        };
         for stmt in m.sql.split(';') {
             let stmt = stmt.trim();
-            if !stmt.is_empty() {
-                sqlx::query(stmt).execute(pool).await?;
+            if stmt.is_empty() {
+                continue;
             }
+            if column_guarded && is_alter_table(stmt) {
+                continue;
+            }
+            sqlx::query(stmt).execute(&mut *tx).await?;
         }
-        register_migration(pool, m).await?;
+        sqlx::query("INSERT INTO _toogl_migrations (version, description) VALUES (?, ?)")
+            .bind(m.version)
+            .bind(m.description)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
     }
     Ok(())
 }
 
-/// 用 pragma_table_info 判断列是否已存在（表名/列名只来自 MIGRATIONS 常量，无注入面）
-async fn column_exists(pool: &SqlitePool, table: &str, column: &str) -> Result<bool, sqlx::Error> {
-    let sql = format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?");
-    let (count,): (i64,) = sqlx::query_as(&sql).bind(column).fetch_one(pool).await?;
-    Ok(count > 0)
+/// 判断语句块是否为 ALTER TABLE：迁移文件允许语句前带 `--` 注释行（分号切分后
+/// 注释与语句在同一块里），需剥掉注释与空行后看第一条有效行
+fn is_alter_table(stmt: &str) -> bool {
+    stmt.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with("--"))
+        .is_some_and(|l| l.to_ascii_uppercase().starts_with("ALTER TABLE"))
 }
 
-/// 登记一条已应用的迁移
-async fn register_migration(pool: &SqlitePool, m: &Migration) -> Result<(), sqlx::Error> {
-    sqlx::query("INSERT INTO _toogl_migrations (version, description) VALUES (?, ?)")
-        .bind(m.version)
-        .bind(m.description)
-        .execute(pool)
-        .await?;
-    Ok(())
+/// 用 pragma_table_info 判断列是否已存在（表名/列名只来自 MIGRATIONS 常量，无注入面）
+async fn column_exists(
+    conn: &mut sqlx::SqliteConnection,
+    table: &str,
+    column: &str,
+) -> Result<bool, sqlx::Error> {
+    let sql = format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?");
+    let (count,): (i64,) = sqlx::query_as(&sql).bind(column).fetch_one(conn).await?;
+    Ok(count > 0)
 }
 
 #[cfg(test)]
@@ -342,7 +359,7 @@ mod tests {
         let (_tmp, pool) = temp_pool().await;
         migrate(&pool).await.unwrap();
 
-        // 造数：kimi 与 mimo/omp/deepseek 各一份
+        // 造数：kimi 与非 kimi 平台各一份
         sqlx::query(
             "INSERT INTO log_file (platform, path, offset, size, mtime, last_scanned_at)
              VALUES ('kimi', 'k.log', 0, 0, 0, '2026-01-01T00:00:00Z'),
@@ -485,6 +502,81 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!((count, total), (1, 2));
+        let (registered,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM _toogl_migrations WHERE version = 7")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(registered, 1);
+    }
+
+    /// 0007 半截状态修复：列已存在（历史手工加列 / 旧版非事务迁移在回填前崩溃残留）
+    /// 但回填未做且版本未登记时，重跑 migrate 应跳过 ALTER 但补做回填，而不是整段跳过
+    #[tokio::test]
+    async fn migration_0007_guard_skips_alter_but_still_backfills() {
+        let (_tmp, pool) = temp_pool().await;
+        // 模拟 0006 时代的既有库：应用 0001~0006 并登记（0007 未登记）
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS _toogl_migrations (
+                version INTEGER PRIMARY KEY,
+                description TEXT NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for m in &MIGRATIONS[..6] {
+            apply_sql(&pool, m.sql).await;
+            sqlx::query("INSERT INTO _toogl_migrations (version, description) VALUES (?, ?)")
+                .bind(m.version)
+                .bind(m.description)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        // 造半截状态：只执行 0007 的 ALTER（列已加），回填未执行；日聚合行 request_count 恒 0
+        sqlx::query("ALTER TABLE usage_daily ADD COLUMN request_count INTEGER NOT NULL DEFAULT 0")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO log_file (platform, path, offset, size, mtime, last_scanned_at)
+             VALUES ('kimi', 'k.log', 0, 0, 0, '2026-01-01T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO usage_event
+                 (platform, cli, log_file_id, ts, session_id, project, model,
+                  input_other, output, cache_read, cache_creation, cost)
+             VALUES ('kimi', 'kimi-code', 1, 1000, 's1', 'app', 'm1', 10, 1, 0, 0, NULL),
+                    ('kimi', 'kimi-code', 1, 2000, 's1', 'app', 'm1', 20, 2, 0, 0, NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO usage_daily
+                 (date, platform, cli, project, model, input_other, output, cache_read, cache_creation)
+             VALUES ('1970-01-01', 'kimi', 'kimi-code', 'app', 'm1', 30, 3, 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        migrate(&pool).await.unwrap();
+
+        // ALTER 被守卫跳过（不报错），回填补做：request_count = 事件行数
+        let (input, request_count): (i64, i64) =
+            sqlx::query_as("SELECT input_other, request_count FROM usage_daily")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!((input, request_count), (30, 2));
+        // 版本已登记
         let (registered,): (i64,) =
             sqlx::query_as("SELECT COUNT(*) FROM _toogl_migrations WHERE version = 7")
                 .fetch_one(&pool)

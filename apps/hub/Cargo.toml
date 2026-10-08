@@ -3,7 +3,7 @@ name = "toogl-hub"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Toogl 中枢服务（跑在一体机上，无界面）"
+description = "Toogl 中枢服务（无界面，骨架冻结，仅 /api/v1/health）"
 
 [dependencies]
 toogl-core = { path = "../../crates/core" }

@@ -1,11 +1,9 @@
-pub mod credential;
 pub mod error;
 pub mod proxy;
 pub mod subscription;
 pub mod sysproxy;
 pub mod usage;
 
-pub use credential::Credential;
 pub use error::{CommandError, CommandErrorKind};
 pub use proxy::{
     DelayStatus, MihomoVersion, NodeDelayResult, ProxiesSummary, ProxyGroup, ProxyGroupType,

@@ -3,8 +3,10 @@
 //! 职责：
 //! - 应用 setup 时拉起 mihomo 子进程（-d 工作目录 -f 配置文件），退出时（RunEvent::Exit）回收，
 //!   确保不留孤儿进程；
-//! - external-controller 端口冲突顺延：9090 被占则探测 9091…9100，实际端口写入
-//!   proxy_setting 表（toogl_core::proxy_setting，与 UsageService 同一库文件）；
+//! - external-controller 端口：首跑探测顺延（9090 被占则 9091…9100）写入新建配置模板；
+//!   非首跑以已有配置的 external-controller 端口为准（用户可手改），配置端口被占且
+//!   为本工具模板时顺延写回（用户手写配置不动）。实际端口写入 proxy_setting 表
+//!   （toogl_core::proxy_setting，与 UsageService 同一库文件）；
 //! - mixed-port 同样顺延（7890…7900），但只在首跑生成配置模板时生效；实际生效值
 //!   （已有配置以文件解析为准）同样写入 proxy_setting；
 //! - 首次运行生成最小可用配置（app_data_dir/mihomo/config.yaml，external-controller
@@ -31,6 +33,7 @@ use toogl_core::proxy_setting::{
     generate_controller_secret, ProxySettingStore, KEY_CONTROLLER_PORT, KEY_CONTROLLER_SECRET,
     KEY_MIXED_PORT,
 };
+use toogl_core::subscription::TEMPLATE_MARKER;
 
 /// external-controller 探测区间：默认 9090，被占顺延，9100 封顶
 pub const CONTROLLER_PORT_START: u16 = 9090;
@@ -53,9 +56,6 @@ const READY_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const READY_POLL_TIMEOUT: Duration = Duration::from_secs(2);
 /// 失败原因中附带的 mihomo 输出截断长度（防超长日志）
 const OUTPUT_SNIPPET_MAX: usize = 500;
-/// 本工具生成的配置模板标记（首跑模板头注释）：升级路径据此区分
-/// 「我们生成的旧模板（缺 secret 可自动补写）」与「用户手写配置（不动）」
-const TEMPLATE_MARKER: &str = "本文件由 Toogl 首次运行自动生成";
 
 /// 代理核心（M5）共享状态。sidecar 拉起失败时降级为错误态（存原因），
 /// 命令层统一返回可读错误，不影响应用其余模块。
@@ -154,17 +154,25 @@ async fn start_inner(app: &AppHandle, app_data_dir: &Path) -> Result<ProxyCore, 
     let work_dir = app_data_dir.join("mihomo");
     std::fs::create_dir_all(&work_dir).map_err(|e| format!("创建 mihomo 工作目录失败: {e}"))?;
 
-    // 端口冲突顺延：9090 被占（如用户本机已有 clash/mihomo 实例）则探测 9091…9100
-    let port = pick_port_in(CONTROLLER_PORT_START, CONTROLLER_PORT_END, port_free)
-        .ok_or_else(|| format!("{CONTROLLER_PORT_START}~{CONTROLLER_PORT_END} 端口全部被占用"))?;
+    // external-controller 端口分首跑/非首跑：
+    // - 首跑：探测顺延（9090 被占，如用户本机已有 clash/mihomo 实例，则 9091…9100），
+    //   探测值写入新建的配置模板；
+    // - 非首跑：以已有配置的 external-controller 端口为准（下面从文件解析；
+    //   用户手改配置端口后 client 跟着走，不会再连错端口超时降级）
+    let first_run = !work_dir.join("config.yaml").exists();
+    let template_port = if first_run {
+        pick_port_in(CONTROLLER_PORT_START, CONTROLLER_PORT_END, port_free).ok_or_else(|| {
+            format!("{CONTROLLER_PORT_START}~{CONTROLLER_PORT_END} 端口全部被占用")
+        })?
+    } else {
+        // 占位值：不写入已有配置，实际端口下面从文件解析
+        CONTROLLER_PORT_START
+    };
 
     // 首跑生成最小可用配置；已有配置（用户手工改过）不覆盖。
-    // 注意：顺延后的端口只写进新建的配置模板；既有配置的端口以文件为准，
-    // 若与本次探测端口不一致会在就绪等待处超时并报出可读原因。
     // mixed-port 同样做冲突顺延（7890~7900），但只在首跑生成模板时生效：
     // 已有配置的 mixed-port 以文件为准，若被占 mihomo 会监听失败，
     // 原因经就绪等待的失败信息（proxy_status.startup_error）体现。
-    let first_run = !work_dir.join("config.yaml").exists();
     let mixed_port = if first_run {
         pick_port_in(MIXED_PORT_START, MIXED_PORT_END, port_free).unwrap_or_else(|| {
             eprintln!(
@@ -180,7 +188,7 @@ async fn start_inner(app: &AppHandle, app_data_dir: &Path) -> Result<ProxyCore, 
     // 防止本机任意进程随意控制内核；secret 仅在新建配置时写入模板，
     // 已有配置不覆盖（secret 升级走下面的 resolve_existing_secret）
     let new_secret = generate_controller_secret();
-    let (config_path, created) = ensure_config(&work_dir, port, mixed_port, &new_secret)
+    let (config_path, created) = ensure_config(&work_dir, template_port, mixed_port, &new_secret)
         .map_err(|e| format!("准备 mihomo 配置失败: {e}"))?;
     if created {
         eprintln!(
@@ -194,6 +202,52 @@ async fn start_inner(app: &AppHandle, app_data_dir: &Path) -> Result<ProxyCore, 
         .as_deref()
         .and_then(parse_mixed_port)
         .unwrap_or(mixed_port);
+
+    // 实际生效的 external-controller 端口：
+    // - 本次新建配置 → 首跑探测值；
+    // - 已有配置 → 以文件里的 external-controller 端口为准；该端口被占且配置带
+    //   模板标记（我们生成的模板）时顺延并写回（与 resolve_existing_secret 同款
+    //   升级路径）；用户手写配置（无标记）以配置端口为准，连不上会在就绪等待处
+    //   报出可读原因
+    let port = if created {
+        template_port
+    } else {
+        match content.as_deref().and_then(parse_controller_port) {
+            Some(configured) => {
+                let is_template = content
+                    .as_deref()
+                    .is_some_and(|c| c.contains(TEMPLATE_MARKER));
+                match resolve_existing_controller_port(configured, is_template, port_free) {
+                    Some(new_port) => {
+                        let patched = rewrite_controller_port(
+                            content.as_deref().unwrap_or_default(),
+                            new_port,
+                        );
+                        match std::fs::write(&config_path, patched) {
+                            Ok(()) => {
+                                eprintln!(
+                                    "[sidecar] 配置 external-controller 端口 {configured} 被占用，已顺延到 {new_port} 并写回配置"
+                                );
+                                new_port
+                            }
+                            // 写回失败：mihomo 读的仍是旧文件，client 目标端口与文件保持一致
+                            Err(e) => {
+                                eprintln!(
+                                    "[sidecar] controller 端口顺延写回失败，沿用配置端口 {configured}: {e}"
+                                );
+                                configured
+                            }
+                        }
+                    }
+                    None => configured,
+                }
+            }
+            // 配置里解析不到 external-controller 行（如手改删除）：探测空闲端口兜底，
+            // mihomo 多半不暴露 API，原因在就绪等待处报出
+            None => pick_port_in(CONTROLLER_PORT_START, CONTROLLER_PORT_END, port_free)
+                .unwrap_or(CONTROLLER_PORT_START),
+        }
+    };
 
     // 实际生效的 external-controller secret：
     // - 本次新建配置 → 刚生成的密钥；
@@ -435,8 +489,8 @@ mixed-port: {mixed_port}
 bind-address: 127.0.0.1
 allow-lan: false
 
-# RESTful API 只绑回环；端口由 Toogl 启动时在 9090~9100 探测顺延，
-# 手工改配置后需与本文件端口一致，否则软件侧会连不上
+# RESTful API 只绑回环；首跑时端口由 Toogl 在 9090~9100 探测顺延。
+# 手工改端口后软件侧以下次启动时本文件为准（本工具模板端口被占会自动顺延写回）
 external-controller: 127.0.0.1:{controller_port}
 
 # RESTful API 鉴权密钥：Toogl 首跑随机生成，同时持久化到 proxy_setting 表
@@ -561,6 +615,59 @@ pub async fn resolve_mixed_port(app_data_dir: &Path) -> u16 {
         .ok()
         .and_then(|content| parse_mixed_port(&content))
         .unwrap_or(MIXED_PORT)
+}
+
+/// 纯解析：取顶层 `external-controller: <host>:<port>` 行的端口号（忽略注释与
+/// 缩进变体），便于单测。与 parse_mixed_port 同款极简行解析；
+/// 兼容 `127.0.0.1:9090` / `:9090` / `9090` 三种写法（取最后一个冒号后的端口段）。
+fn parse_controller_port(config: &str) -> Option<u16> {
+    for line in config.lines() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("external-controller:") {
+            let value = value.trim().trim_matches(['\'', '"']);
+            return value.rsplit(':').next()?.trim().parse().ok();
+        }
+    }
+    None
+}
+
+/// 已有配置的 controller 端口决策（纯函数便于单测），返回 Some(顺延后的新端口)：
+/// - 配置端口空闲 → None（沿用配置端口）；
+/// - 配置端口被占且为用户手写配置（无模板标记）→ None，尊重用户配置，
+///   连不上会在就绪等待处报出可读原因；
+/// - 配置端口被占且为本工具模板 → 顺延探测空闲端口（与首跑同区间），
+///   Some(新端口) 由调用方写回配置；顺延区间全被占 → None（沿用，就绪等待处暴露原因）。
+fn resolve_existing_controller_port(
+    configured: u16,
+    is_our_template: bool,
+    probe: impl Fn(u16) -> bool,
+) -> Option<u16> {
+    if probe(configured) || !is_our_template {
+        return None;
+    }
+    pick_port_in(CONTROLLER_PORT_START, CONTROLLER_PORT_END, probe)
+}
+
+/// 改写配置文本中的 external-controller 行为新端口（其余行原样保留）。
+/// 仅在顺延升级路径调用（调用方已确认能解析出端口）。
+fn rewrite_controller_port(config: &str, new_port: u16) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    for line in config.lines() {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with('#') && trimmed.starts_with("external-controller:") {
+            lines.push(format!("external-controller: 127.0.0.1:{new_port}"));
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+    let mut out = lines.join("\n");
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
 }
 
 /// 纯解析：取顶层 `mixed-port: <n>` 行的端口号（忽略注释与缩进变体），便于单测。
@@ -745,6 +852,83 @@ mod tests {
         let content = std::fs::read_to_string(tmp.path().join("config.yaml")).unwrap();
         assert!(content.contains("用户手工配置"));
         assert!(content.contains("127.0.0.1:9000"));
+    }
+
+    // ---- external-controller 端口解析 / 顺延决策 / 写回 ----
+
+    #[test]
+    fn parse_controller_port_variants() {
+        // 初始模板按传入端口生成
+        assert_eq!(
+            parse_controller_port(&render_initial_config(9093, 7890, "s")),
+            Some(9093)
+        );
+        // 用户手改为其他端口 / 其他写法
+        assert_eq!(
+            parse_controller_port("external-controller: 127.0.0.1:9500\n"),
+            Some(9500)
+        );
+        assert_eq!(
+            parse_controller_port("external-controller: :9501\n"),
+            Some(9501)
+        );
+        assert_eq!(
+            parse_controller_port("external-controller: 9502\n"),
+            Some(9502)
+        );
+        // 注释行与缺失字段
+        assert_eq!(
+            parse_controller_port("# external-controller: 127.0.0.1:9090\n"),
+            None
+        );
+        assert_eq!(parse_controller_port("mode: rule\n"), None);
+        // 非法端口号
+        assert_eq!(
+            parse_controller_port("external-controller: 127.0.0.1:abc\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_existing_controller_port_free_keeps_configured() {
+        // 配置端口空闲 → 沿用，不顺延
+        assert_eq!(resolve_existing_controller_port(9500, true, |_| true), None);
+    }
+
+    #[test]
+    fn resolve_existing_controller_port_occupied_user_config_keeps_configured() {
+        // 被占但为用户手写配置（无标记）→ 以配置端口为准，不顺延
+        assert_eq!(
+            resolve_existing_controller_port(9500, false, |_| false),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_existing_controller_port_occupied_template_shifts() {
+        // 被占且为本工具模板 → 顺延到区间内第一个空闲端口
+        let occupied: HashSet<u16> = [9500, 9090, 9091].into_iter().collect();
+        assert_eq!(
+            resolve_existing_controller_port(9500, true, |p| !occupied.contains(&p)),
+            Some(9092)
+        );
+        // 顺延区间全被占 → 不顺延（沿用配置端口，就绪等待处暴露原因）
+        assert_eq!(
+            resolve_existing_controller_port(9500, true, |_| false),
+            None
+        );
+    }
+
+    #[test]
+    fn rewrite_controller_port_replaces_line_and_preserves_rest() {
+        let old = render_initial_config(9090, 7890, "s3cret");
+        let patched = rewrite_controller_port(&old, 9095);
+        // 新端口可解析回来，其余内容（mixed-port / secret / 模板标记）保留
+        assert_eq!(parse_controller_port(&patched), Some(9095));
+        assert!(patched.contains("mixed-port: 7890"));
+        assert!(patched.contains("secret: s3cret"));
+        assert!(patched.contains(TEMPLATE_MARKER));
+        assert!(!patched.contains("127.0.0.1:9090"));
     }
 
     // ---- external-controller secret 解析 / 注入 / 升级决策 ----

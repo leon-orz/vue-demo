@@ -74,11 +74,16 @@ async fn refresh_kimi(
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .unwrap_or(crate::adapters::kimi::DEFAULT_API_BASE);
+        .or_else(|| account::default_api_base(Platform::Kimi))
+        .expect("Kimi 平台默认 api_base 常量必然存在");
     let adapter = KimiAdapter::new();
-    let balance = adapter.fetch_balance(api_base, key).await?;
     let coding_base = coding_base_override.unwrap_or(DEFAULT_CODING_API_BASE);
-    let coding = adapter.fetch_coding_usages(coding_base, key).await;
+    // 余额与 coding usages 并发拉取；余额失败即整体失败，coding best-effort 降级
+    let (balance, coding) = futures::join!(
+        adapter.fetch_balance(api_base, key),
+        adapter.fetch_coding_usages(coding_base, key),
+    );
+    let balance = balance?;
     Ok(merge_kimi_snapshot(&balance, coding))
 }
 
@@ -86,8 +91,11 @@ async fn refresh_kimi(
 /// 余额（/v1/users/me/balance）与套餐用量（/coding/v1/usages，非官方 best-effort）
 /// 语义不同——前者是按量金额，后者是 5h 窗口 + 月度池余量。quota_snapshot 表按平台一行，
 /// 拆两条会让 quota_latest 的"最近一条"语义模糊，故合并为一条：
-/// coding 月度池可用时 total/used/remaining 取自它（套餐余量是用户更关心的进度），
-/// 否则 remaining 回落为余额 available；两个数据源的完整明细都进 detail_json.sources。
+/// coding 整体请求成功（Ok）时，total/used/remaining 直接取月度池字段
+/// （month_total / month_used 接口缺失即为 None，不回落）；
+/// 仅 month_remaining 缺失或 coding 整体失败（Err）时，remaining 回落为余额 available，
+/// 失败时 total/used 为 None、错误原因记入 detail_json.sources.coding_usages_error。
+/// 两个数据源的完整明细都进 detail_json.sources。
 fn merge_kimi_snapshot(
     balance: &crate::adapters::kimi::KimiBalance,
     coding: Result<crate::adapters::kimi::KimiCodingUsages, AdapterError>,

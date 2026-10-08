@@ -58,5 +58,5 @@ export const useSettingsStore = defineStore('settings', () => {
     disposeSystemThemeListener = () => media.removeEventListener('change', onSystemThemeChange)
   }
 
-  return { datasourceMode, theme, kimiSessionsDir, init, applyTheme }
+  return { datasourceMode, theme, kimiSessionsDir, init }
 })

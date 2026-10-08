@@ -32,14 +32,20 @@ export const useSubscriptionStore = defineStore('subscription', () => {
   const updating = computed(() => updatingAction.value || (status.value?.updating ?? false))
 
   let timer: ReturnType<typeof setInterval> | null = null
+  /** refresh 在飞标记：上一次未完成时跳过本轮，避免慢请求（>4s）逐轮叠加 */
+  let refreshing = false
 
-  /** 拉取一次聚合状态；失败只记 loadError，不清空已有状态（保持旧数据可读） */
+  /** 拉取一次聚合状态；失败只记 loadError，不清空已有状态（保持旧数据可读）。在飞则跳过本轮 */
   async function refresh() {
+    if (refreshing) return
+    refreshing = true
     try {
       status.value = await api.subscriptionStatus()
       loadError.value = null
     } catch (err) {
       loadError.value = toCommandError(err)
+    } finally {
+      refreshing = false
     }
   }
 

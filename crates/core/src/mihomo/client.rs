@@ -22,6 +22,8 @@ pub const DEFAULT_TEST_URL: &str = "https://www.gstatic.com/generate_204";
 pub const DEFAULT_DELAY_TIMEOUT_MS: u32 = 5000;
 /// HTTP 客户端整体超时（本地回环服务，10s 已非常宽松）
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+/// 批量测速并发上限：机场上百节点一次性打满会瞬时挤占连接，限流发起
+const TEST_DELAYS_CONCURRENCY: usize = 16;
 
 /// 进程级共享的 reqwest 客户端（连接池复用，避免每次新建）
 static SHARED_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -207,7 +209,8 @@ impl MihomoClient {
         Ok(delay_result(name, body.delay))
     }
 
-    /// 批量测速：并发发起，单节点失败（含 mihomo 不可达）只影响自身结果，
+    /// 批量测速：限流并发发起（上限 [`TEST_DELAYS_CONCURRENCY`]，机场上百节点
+    /// 不会一次性打满连接），单节点失败（含 mihomo 不可达）只影响自身结果，
     /// 不中断其余节点；返回顺序与输入 names 一致。
     pub async fn test_delays(
         &self,
@@ -215,38 +218,31 @@ impl MihomoClient {
         timeout_ms: u32,
         url: &str,
     ) -> Vec<NodeDelayResult> {
-        // 先全部 spawn 出去保证并发，再按输入顺序逐个 await 收集结果
-        let mut handles = Vec::with_capacity(names.len());
-        for name in names {
-            let this = self.clone();
-            let node_name = name.clone();
-            let url = url.to_string();
-            let handle =
-                tokio::spawn(async move { this.test_delay(&node_name, timeout_ms, &url).await });
-            handles.push((name.clone(), handle));
-        }
-        let mut out = Vec::with_capacity(handles.len());
-        for (name, handle) in handles {
-            let result = match handle.await {
-                Ok(Ok(result)) => result,
-                // 请求级错误（不可达 / Api / Parse）：记入该节点结果，不拖垮整批
-                Ok(Err(e)) => NodeDelayResult {
-                    name,
-                    delay_ms: None,
-                    delay_status: DelayStatus::Timeout,
-                    error: Some(e.to_string()),
-                },
-                // spawn 任务被取消/panic（正常不会发生）：同样降级为失败结果
-                Err(e) => NodeDelayResult {
-                    name,
-                    delay_ms: None,
-                    delay_status: DelayStatus::Timeout,
-                    error: Some(format!("测速任务异常: {e}")),
-                },
-            };
-            out.push(result);
-        }
-        out
+        use futures::stream::StreamExt as _;
+        let mut indexed: Vec<(usize, NodeDelayResult)> =
+            futures::stream::iter(names.iter().cloned().enumerate().map(|(i, name)| {
+                let this = self.clone();
+                let url = url.to_string();
+                async move {
+                    let result = match this.test_delay(&name, timeout_ms, &url).await {
+                        Ok(result) => result,
+                        // 请求级错误（不可达 / Api / Parse）：记入该节点结果，不拖垮整批
+                        Err(e) => NodeDelayResult {
+                            name,
+                            delay_ms: None,
+                            delay_status: DelayStatus::Timeout,
+                            error: Some(e.to_string()),
+                        },
+                    };
+                    (i, result)
+                }
+            }))
+            .buffer_unordered(TEST_DELAYS_CONCURRENCY)
+            .collect()
+            .await;
+        // buffer_unordered 不保序，按输入下标重排
+        indexed.sort_by_key(|(i, _)| *i);
+        indexed.into_iter().map(|(_, r)| r).collect()
     }
 
     /// PATCH /configs：规则模式切换，body {"mode": "rule|global|direct"}。

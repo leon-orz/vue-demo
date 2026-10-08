@@ -21,3 +21,14 @@ pub enum MihomoError {
     #[error("mihomo 响应解析失败: {0}")]
     Parse(String),
 }
+
+/// MihomoError → CommandError：不可达归 network，其余归 internal
+impl From<MihomoError> for crate::models::CommandError {
+    fn from(e: MihomoError) -> Self {
+        use crate::models::CommandError;
+        match e {
+            MihomoError::Unreachable(m) => CommandError::network(m),
+            MihomoError::Api(m) | MihomoError::Parse(m) => CommandError::internal(m),
+        }
+    }
+}
