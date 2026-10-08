@@ -4428,6 +4428,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toogl-core",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

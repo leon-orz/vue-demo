@@ -95,6 +95,7 @@ cargo test -p toogl-core -- --ignored keyring_real_roundtrip   # 真实系统钥
 - 系统代理退出残留是体验事故：M5 需启动自检 + 退出钩子双重保障。
 - `tauri.conf.json` 的 CSP 已收紧：`default-src/script-src 'self'`、`style-src 'self' 'unsafe-inline'`、`img/font-src` 放行 `data:`、`connect-src 'self'` 并放行 `ipc:` / `http://ipc.localhost` / dev 的 `localhost:1420`（含 HMR ws）。改动 CSP 后需验证 dev 窗口与生产包均无资源加载报错。
 - mihomo sidecar 只打 Windows 二进制，选官方 release 固定版本（v1.19.32，常量 `sidecar.rs::MIHOMO_EXPECTED_VERSION`）；启动后比对 `client.version()`，不一致仅告警不阻断，换二进制时必须同步该常量。
+- 启动期 WebView2 探测：`main.rs` 在 `run()` 前调 `tauri::webview_version()`，缺失时弹原生 MessageBox 引导安装并退出（发布版无控制台，不探测则建窗静默失败）；NSIS 安装包默认内嵌 WebView2 引导安装，运行期探测是第二道防线。
 
 ## 当前状态
 
