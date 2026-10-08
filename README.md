@@ -23,7 +23,7 @@ cargo test --workspace  # Rust 测试（含 ts-rs 类型导出）
 ## 目录
 
 - `apps/desktop`：桌面客户端（Tauri 2 + Vue 3 + Pinia + Tailwind CSS + shadcn-vue）
-- `apps/hub`：中枢服务（Rust axum，阶段二，已冻结）
+- `apps/hub`：toogl-hub 冻结的空骨架（Rust axum，仅 /api/v1/health）
 - `crates/core`：共享 Rust crate（models / adapters / datasource / keystore / mihomo / subscription 等，详见 `AGENTS.md`）
 - `packages/core-types`：TS 类型（ts-rs 生成，禁止手改）
 - `packages/ui`：共享 Vue 组件（预留）
