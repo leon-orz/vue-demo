@@ -1,109 +1,118 @@
-# AGENTS.md
+# Repository Guidelines
 
-> 本文件面向 AI 编码助手，描述 Toogl（图格）项目的架构、命令与约定。
-> 项目权威文档在 `docs/`：`01-需求文档.md`（PRD）、`02-开发计划.md`（技术选型、里程碑、规范与测试）。代码与文档冲突时以代码为准，术语与阶段划分以文档为准。
+## Project Overview
 
-## 项目概述
+Toogl（图格）是面向 Windows 10/11 的个人桌面实用工具箱，采用 Tauri 2 + Vue 3 + TypeScript + Rust。
 
-Toogl（图格）是一个**个人自用的 Windows 桌面工具箱**：Tauri 2 桌面壳 + Vue 3 前端 + Rust 后端，monorepo（pnpm workspace + Cargo workspace）。**仅支持 Windows**（NF-14），不处理 macOS/Linux 桌面端。
+产品以 mihomo **魔法工具** 为核心，同时提供首页状态看板、网络诊断、系统状态、空间维护和软件设置。看板展示各模块状态并提供入口，不复制模块业务逻辑。
 
-主要功能模块（编号与 PRD 对齐）：
+当前代理只使用 Windows 系统代理，不做 TUN。新增模块采用编译时登记，避免提前引入运行时插件、远程 Hub 或空业务抽象。
 
-- **M1 AI 用量统计（仅 Kimi Code）**：解析 kimi-code `~/.kimi-code/sessions/**/wire.jsonl` 本地 CLI 日志，聚合 token 用量 / 缓存命中率 / 趋势 / 分布；配额余额走 Kimi 适配器（开放平台 `/v1/users/me/balance` 余额 + 非官方 `/coding/v1/usages` best-effort）。只读聚合，不转发流量。schema 与命令层的 platform 维度保持泛化。不支持 Codex CLI 日志；GLM 套餐不列入。
-- **M5 魔法工具**：内嵌 mihomo sidecar（RESTful API 默认 9090），做节点切换、系统代理开关、规则分流。目标场景为软件与网站（不考虑游戏）；节点导入以订阅链接为主（用户当前为商家包月订阅）、手动粘贴为辅（后续 VPS 自建）。阶段一仅系统代理模式，不做 TUN。
-- **M6 设置 + Dashboard**。
+产品范围与分阶段目标见 `docs/01-需求文档.md`、`docs/02-开发计划.md`；模块接入规则见 `docs/03-模块开发指南.md`。
 
-分阶段开发：阶段一（不依赖新硬件，桌面端直连）→ 阶段三（按需增强）。代码中的 `TODO(S1-2)` 等标记对应各阶段任务号。
+## Architecture & Data Flow
 
-## 仓库结构
+- **调用链**：Vue 页面 → 模块 Pinia Store / `api.ts` → Tauri `invoke` → `apps/desktop/src-tauri/src/commands/` → `crates/core` → SQLite、Windows API、mihomo 或固定外部 API。
+- **模块边界**：`apps/desktop/src/app/modules.ts` 是导航、路由与可选看板卡的唯一登记点。模块拥有自己的页面、API、Store、配置和摘要卡；看板只遍历摘要卡，不复制业务公式。软件设置只管理全局偏好，不依赖业务模块。
+- **魔法工具链**：`sidecar.rs` 管理 mihomo 生命周期，`mihomo/client.rs` 调 REST API；`sysproxy.rs` 在开启前备份系统代理，关闭/退出时恢复。退出必须先恢复系统代理，再结束 sidecar。
+- **订阅链**：拉取/粘贴 → 解析 → 与手动节点合并（同名手动优先）→ 托管文件 → mihomo 热重载。更新互斥，热重载失败回滚节点文件；24 小时后台更新由 Rust 管理，不依赖页面打开。
+- **基础工具**：网络诊断只执行固定 DNS/TCP 检查和固定 `ipconfig.exe /flushdns`；系统状态只读 Windows API；空间维护只扫描当前用户 `%LOCALAPPDATA%\\Temp`，第一阶段不删除文件。
+- **持久化**：`<app_data_dir>/toogl.db` 存代理数据、订阅节点元信息和偏好；`PreferenceStore` 使用类型化 namespace JSON。主题 localStorage 仅作首屏缓存；控制密钥存放在内核配置和代理设置中。
+- **跨语言类型**：Rust `models/` 是单一来源，ts-rs 生成 `@toogl/core-types`。`packages/core-types/bindings/`（含 `index.ts`）禁止手改。
 
-```
-apps/
-  desktop/                # 桌面客户端 toogl-desktop（Tauri 2 + Vue 3）
-    src/                  # Vue 前端：api/（invoke 封装，与 Rust 命令一一对应）、
-                          #   stores/（Pinia）、views/、components/、lib/
-    src-tauri/            # Rust 壳：src/commands/（Tauri commands 薄壳）、
-                          #   sidecar.rs（mihomo 进程管理，已落地）、binaries/（sidecar 二进制）
-  hub/                    # toogl-hub：冻结的空骨架（仅 /api/v1/health）
-crates/
-  core/                   # 共享核心 toogl-core：models / adapters（kimi 配额适配器）/
-                          #   datasource / keystore / mihomo / kimicode（wire.jsonl 日志 parser）/
-                          #   logs/（文件游标扫描入库骨架，按平台泛化保留）/
-                          #   usage/（编排层：query 聚合查询、quota 配额刷新、account 账户配置）/
-                          #   sysproxy.rs（系统代理读写与现场备份还原）、proxy_setting.rs（代理设置持久化）、
-                          #   subscription/（M5-07 节点导入 core：分享链接解析 share / 内容形态识别 content /
-                          #   订阅拉取 fetch / 托管节点文件与 config.yaml 接线 config /
-                          #   更新与粘贴导入编排 update，命令路径与定时任务共用）、
-                          #   db.rs（SQLite 连接与迁移执行）
-                          #   migrations/（SQLite schema，由 src/db.rs 按版本号迁移执行）
-packages/
-  core-types/             # @toogl/core-types：TS 类型，ts-rs 从 Rust models 生成
-  ui/                     # @toogl/ui：共享 Vue 组件（预留，基本为空）
-docs/                     # 需求 / 开发计划两份中文文档
-.github/workflows/ci.yml  # CI
-```
+- **组件与封装**：`App.vue` 只装配布局；侧栏组件位于 `app/components/`。基础工具各有独立页面、`api.ts`、局部 `use*.ts` 和展示面板；系统信息查询允许供空间维护复用。`components/ui/` 仅基础 UI，`shared/` 为跨模块交互，`lib/` 为纯函数。不要复制实现或添加空服务层。
+- **实现进度**：六个入口已拆分；看板当前仅魔法工具有摘要卡，其他模块摘要卡仍为计划，不能写成已实现。
 
-关键架构原则：
+## Key Directories
 
-- **Rust 核心下沉**：数据模型、平台适配器、日志解析、加解密全部在 `crates/core`；桌面端 Tauri commands 是它的薄壳，不写重复业务逻辑。
-- **数据获取层可替换**：`DataSource` trait（`crates/core/src/datasource/`），当前只有 `DirectSource`（直连），`HubSource` 预留未接线，UI 层零改动。
-- **类型单一来源**：TS 类型由 ts-rs 从 `crates/core/src/models` 的 Rust 结构体生成到 `packages/core-types/bindings/`（`#[ts(export)]` + `export_bindings` 测试）。
+| 路径                                                 | 修改职责                                                       |
+| ---------------------------------------------------- | -------------------------------------------------------------- |
+| `apps/desktop/src/app/`                              | 模块登记、路由、调用契约                                       |
+| `apps/desktop/src/modules/dashboard/`                | 首页状态看板布局，不持有业务公式                               |
+| `apps/desktop/src/modules/proxy/`                    | 魔法工具：代理、节点、订阅和导入                               |
+| `apps/desktop/src/modules/network-diagnostics/`      | 固定网络诊断和 DNS 刷新                                        |
+| `apps/desktop/src/modules/system-status/`            | Windows 与设备只读信息                                         |
+| `apps/desktop/src/modules/storage/`                  | Temp 目录扫描和空间概况                                        |
+| `apps/desktop/src/modules/settings/`                 | Toogl 主题和版本信息                                           |
+| `apps/desktop/src/shared/`、`components/ui/`、`lib/` | 通用错误、UI 和格式化能力                                      |
+| `apps/desktop/src-tauri/src/`                        | 桌面生命周期、commands、mihomo sidecar 管理                    |
+| `crates/core/src/`                                   | mihomo、subscription、代理设置、系统代理、系统工具、偏好和模型 |
+| `crates/core/migrations/`                            | 只追加的 SQLite schema 迁移                                    |
+| `packages/core-types/`                               | Rust 生成的前端类型                                            |
+| `docs/`                                              | 产品、开发计划、模块接入和验收约定                             |
 
-## 环境与常用命令
+## Development Commands
 
-环境要求：Node.js 24 LTS、pnpm 12（corepack/Volta 管理，根 `package.json` 的 `packageManager` 锁定）、Rust stable（rustup）、Windows 10/11 + WebView2。
+以下命令均在仓库根目录的 PowerShell 中执行；启动类命令仅作参考，执行前遵守下文协作边界。
 
-```bash
-pnpm install                # 安装依赖（同时激活 pre-commit 钩子）
-pnpm dev                    # Vite dev server（端口 1420，strictPort）
-pnpm tauri dev              # 起桌面壳应用（前端 + Rust 一起）
-pnpm build                  # 前端生产构建：vue-tsc -b 类型检查 + vite build
-pnpm tauri build            # 打 Windows NSIS 安装包
-pnpm lint / pnpm lint:fix   # ESLint 9 flat config
-pnpm format / format:check  # Prettier
-cargo test --workspace      # Rust 全部测试（含 ts-rs 类型导出测试）
-cargo fmt / cargo clippy --workspace --all-targets -- -D warnings
-cargo test -p toogl-core export_bindings   # 改 models 后重新生成 TS bindings
-cargo test -p toogl-core -- --ignored keyring_real_roundtrip   # 真实系统钥匙串冒烟测试（手动）
+```powershell
+pnpm install                                      # 安装依赖并激活 pre-commit 钩子
+pnpm dev                                          # 仅 Vite，固定端口 1420
+pnpm tauri dev                                    # 完整桌面应用（前端 + Rust）
+pnpm build                                        # vue-tsc 类型检查 + Vite 生产构建
+pnpm tauri build                                  # Windows NSIS 安装包，自动构建前端
+pnpm test:front                                   # Vitest 单次运行
+cargo test --workspace                            # Rust 全量测试并导出类型
+cargo test -p toogl-core export_bindings           # 改 Rust models 后生成 TS bindings
+pnpm lint                                         # ESLint；自动修复用 pnpm lint:fix
+pnpm format:check                                 # Prettier；格式化用 pnpm format
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-## 代码风格与约定
+聚焦测试示例：
 
-- **注释与文档用中文**；提交信息用英文 Conventional Commits，scope 用模块小写名（usage/proxy/settings/hub/core）。
-- **Rust**：rustfmt（4 空格缩进，见 `.editorconfig`）+ clippy，CI 中 `-D warnings`。错误类型用 thiserror；内部 trait 允许 `async fn`（已 `#[allow(async_fn_in_trait)]`）。
-- **TS/Vue**：ESLint 管规则、Prettier 管格式，职责分开（`eslint-config-prettier` 收尾）。Prettier：无分号、单引号、printWidth 100、trailing comma all、LF（换行由 `.gitattributes` 的 `* text=auto eol=lf` 强制，二进制已标注）。TS strict 全开 + `noUnusedLocals` / `noUnusedParameters`；有意未使用的变量用下划线前缀（ESLint 约定）。Vue 用 `<script setup>` + Composition API；页面级组件允许单词命名。
-- **前端路径别名**：`@/` → `apps/desktop/src/`（vite.config.ts 与 tsconfig 均配置）。
-- **类型纪律（重要）**：`packages/core-types/bindings/` **禁止手改**，只由 ts-rs 生成；前端 `invoke` 的参数/返回类型必须来自该包。改 Rust models 后跑 `export_bindings` 测试并提交生成物，CI 用 `git diff --exit-code` 校验。
-- **Tauri commands**：`src-tauri/src/commands/` 只做薄壳调 `toogl_core`，前端在 `src/api/` 写一一对应的 invoke 封装。所有命令统一返回 `Result<T, CommandError>`（`crates/core/src/models/error.rs`，ts-rs 导出）；前端 invoke 抛出的即该 JSON 对象，经 `src/api/errors.ts` 的 `toCommandError` 规整后展示/分支。
-- **SQLite migration**：schema 统一收归 Rust 侧（前端不直连数据库）。在 `crates/core/migrations/` 新增 `NNNN_description.sql`，并在 `crates/core/src/db.rs` 的 `MIGRATIONS` 追加，`version` 严格递增、只增不改；SQL 按分号切分逐条执行（**禁止字符串字面量内含分号**），全部语句幂等（IF NOT EXISTS）；每条迁移的全部语句 + 版本登记在同一事务执行（失败整体回滚，重跑从头再来）。
-- **UI 组件**：shadcn-vue（new-york 风格、neutral 底色、lucide 图标，见 `components.json`）+ Tailwind CSS 4；**不使用成品 UI 库**（Naive UI / Element Plus 已排除），不混用 UnoCSS。图表用 ECharts 按需引入（控制包体积）。
-- **提交钩子**：simple-git-hooks + lint-staged，只对暂存文件跑 prettier + eslint --fix；全仓检查由 CI 兜底。
-- **依赖管理**：精确版本 + lockfile 提交；crates.io 走 rsproxy 国内镜像。
+```powershell
+pnpm --filter toogl-desktop test src/modules/proxy/store.spec.ts
+cargo test -p toogl-core subscription
+```
 
-## 测试策略
+## Code Conventions & Common Patterns
 
-- **Rust（主力）**：`cargo test --workspace`。日志解析器（M1 心脏）用脱敏 wire.jsonl fixture 驱动单元测试，覆盖增量偏移与聚合边界；HTTP 适配器用 wiremock mock server 测错误路径（401/超时/字段缺失）。`#[ignore]` 标注依赖真实系统能力的测试（如 keyring 冒烟），手动执行。
-- **前端**：Vitest 测关键 store（usage/proxy/subscription/settings），组件测试从简，不写脆弱快照测试。
-- **e2e**：tauri-driver + WebdriverIO，只覆盖 3 条核心链路（启动见数据 / 切换节点 / 系统代理开关）。
-- **CI**（`.github/workflows/ci.yml`，windows-latest）：`pnpm lint` + `format:check` + `pnpm test:front`（Vitest）；`cargo fmt --check` + `clippy -D warnings` + `cargo test` + bindings 一致性校验；最后 `tauri build`。
-- 每里程碑按《02-开发计划》第 4 节验收标准过真实环境。
+- **语言与命名**：对话、注释、文档和提交说明使用中文；提交格式保留 Conventional Commits 的类型和小写模块 scope，如 `fix(proxy): 恢复原有系统代理设置`。仅在用户明确授权后执行提交。沿用 `modules/<id>/api.ts`、`store.ts`、可选 `components/OverviewCard.vue` 的组织方式；小工具无需空层。
+- **Vue / TS**：使用 `<script setup>`、Composition API、Pinia；页面和较重库按需加载。TS strict，启用 `noUnusedLocals` / `noUnusedParameters`；有意未使用的标识符用 `_` 前缀。`@/` 指向 `apps/desktop/src/`，类型使用 `import type`。
+- **格式**：Prettier 无分号、单引号、100 列、尾逗号、LF；Rust 用 rustfmt、4 空格。ESLint 管规则；`.gitattributes` 强制文本 LF。
+- **IPC 与错误**：前端 `api.ts` 与命令一一对应，参数/返回类型来自 `@toogl/core-types`。顶层 invoke 参数使用 camelCase，DTO 字段遵循生成类型的 serde 命名。commands 统一返回 `Result<T, CommandError>`；前端用 `shared/errors.ts` 的 `toCommandError` 规整。Rust 内部错误用 thiserror；`CommandErrorKind` 使用生成枚举，不另写字符串集合。
+- **异步与状态**：初始化请求复用；后台刷新保留可用缓存；防止旧响应覆盖新状态。页面轮询成对启动/停止，跳过隐藏窗口与在途请求；乐观更新失败回滚。持续后台任务由 `tauri::async_runtime::spawn` 装配，核心异步使用 Tokio。
+- **依赖注入**：沿用显式 trait 接缝，例如系统代理 `RegistryIo` / `ProxyStateStore`；测试注入内存实现，不为统一形式增加服务容器或事件总线。
+- **偏好**：通过 `PreferenceStore` 的类型化读写扩展配置，不向前端开放任意键写入。读取失败不能当作首次使用并写回默认值；旧值仅在迁移成功后删除。
+- **数据库**：新增 `crates/core/migrations/NNNN_description.sql` 并追加 `db.rs::MIGRATIONS`，版本递增、保留历史。每个迁移及版本登记在同一事务中；语句需幂等。执行器按分号切分，SQL 字符串字面量内禁止分号。
+- **系统能力边界**：网络诊断使用固定目标和超时；系统命令使用固定可执行文件和参数；空间扫描限制 Temp 路径并跳过重解析点；不接受前端传入任意命令、路径或脚本。
+- **UI**：Tailwind CSS 4 + shadcn-vue（new-york / neutral）+ lucide。不引入 Naive UI、Element Plus 或 UnoCSS。
 
-## 安全注意事项
+## Important Files
 
-- **敏感 key 存系统钥匙串**：桌面端用 keyring-rs 走 Windows 凭据管理器。**坑：keyring 3 默认不启用平台后端（静默退化为 mock 内存存储），必须显式 `features = ["windows-native"]`**。无桌面环境侧用同一 `SecretStore` trait，底层退回主密钥加密的文件存储；测试用 `MemoryStore`。
-- 设备与 VPS 经 Tailscale 私网互联，服务不开公网端口。
-- 系统代理退出残留是体验事故：M5 需启动自检 + 退出钩子双重保障。
-- `tauri.conf.json` 的 CSP 已收紧：`default-src/script-src 'self'`、`style-src 'self' 'unsafe-inline'`、`img/font-src` 放行 `data:`、`connect-src 'self'` 并放行 `ipc:` / `http://ipc.localhost` / dev 的 `localhost:1420`（含 HMR ws）。改动 CSP 后需验证 dev 窗口与生产包均无资源加载报错。
-- mihomo sidecar 只打 Windows 二进制，选官方 release 固定版本（v1.19.32，常量 `sidecar.rs::MIHOMO_EXPECTED_VERSION`）；启动后比对 `client.version()`，不一致仅告警不阻断，换二进制时必须同步该常量。
-- 启动期 WebView2 探测：`main.rs` 在 `run()` 前调 `tauri::webview_version()`，缺失时弹原生 MessageBox 引导安装并退出（发布版无控制台，不探测则建窗静默失败）；NSIS 安装包默认内嵌 WebView2 引导安装，运行期探测是第二道防线。
+- `apps/desktop/src/main.ts`：Vue、Pinia、路由与主题初始化；`app/router.ts` 使用 hash 路由。
+- `apps/desktop/src/app/modules.ts`：首页看板、魔法工具、网络诊断、系统状态、空间维护和设置的入口登记；新增模块步骤见 `docs/03-模块开发指南.md`。
+- `apps/desktop/src-tauri/src/main.rs`：WebView2 启动探测；`lib.rs`：状态装配、命令登记、后台任务和退出清理。
+- `apps/desktop/src-tauri/src/sidecar.rs`：端口探测、进程管理、`MIHOMO_EXPECTED_VERSION`。
+- `crates/core/src/models/mod.rs`、`models/error.rs`：模型导出入口和统一错误契约。
+- `crates/core/src/db.rs`、`preferences.rs`、`proxy_setting.rs`：迁移、普通偏好和代理设置。
+- `apps/desktop/src-tauri/tauri.conf.json`、`apps/desktop/vite.config.ts`、`apps/desktop/vitest.config.ts`、`apps/desktop/tsconfig.app.json`：构建、CSP、测试和类型规则。
+- `package.json`、`pnpm-workspace.yaml`、`Cargo.toml`：工作区与命令；`.github/workflows/ci.yml`：Windows CI 质量门禁。
+- `docs/01-需求文档.md`、`docs/02-开发计划.md`：产品范围、架构、阶段和人工验收；代码与文档冲突时以代码为准，文档不得把计划功能标为完成。
 
-## 当前状态
+## Runtime/Tooling Preferences
 
-阶段一 S1-1~S1-4 与 M5-07 均已完成：
+- 使用 Node.js 24 LTS、`pnpm@12.4.1` 与 Rust stable。保留 pnpm/Cargo workspace 和 lockfile，不切换 Bun、npm 或 Yarn。
+- 仅支持 Windows 10/11 + WebView2。不要扩展 macOS/Linux 桌面适配。Vite `strictPort` 使用 1420；浏览器中的 `pnpm dev` 无法独立验证 Tauri IPC 与系统能力。
+- mihomo 使用仓库内固定 Windows sidecar（当前 v1.19.32）；替换二进制时同步 `sidecar.rs::MIHOMO_EXPECTED_VERSION`。controller 只监听回环并保留 secret 鉴权。
+- 保留 Tauri CSP；改动后验证开发窗口及生产包资源加载。pre-commit 仅对暂存的前端文件运行 Prettier / ESLint，全仓检查由 CI 执行。
 
-- 已就绪：monorepo 脚手架与 CI、凭据读写收进 `platform_account_set`（keyring 显式 windows-native，SERVICE_NAME 统一在 `keystore::KEYRING_SERVICE_NAME`）、Rust 侧统一 schema 迁移（`crates/core/migrations/`，事件/日聚合/游标表带 `platform`+`cli` 维度，另有 quota_snapshot / platform_account / proxy_setting，由 `db::migrate` 幂等执行）、kimicode wire.jsonl parser（归一化为 UsageEvent，走 `crates/core/logs/` 共享增量游标 + 按日预聚合骨架；单文件容错 + size/mtime 变化触发幂等重扫；扫描互斥锁防并发双计）、`crates/core/usage/` 编排层（聚合查询 query / 配额刷新 quota / 账户配置 account）、Kimi 配额适配器（`adapters/kimi.rs` 余额 + 非官方 coding usages best-effort；wiremock 覆盖 401/超时/字段缺失）、Tauri commands（`commands/usage.rs` 九条命令，统一返回结构化 `CommandError`）、前端 Kimi 用量页（`views/Usage.vue` + QuotaCard 降级态；`stores/usage.ts`）、Dashboard Kimi 摘要卡 + 代理卡、设置页 Kimi 分区（key + api_base + 日志目录覆盖）、ts-rs bindings 链路（含 index.ts 完整性测试）。Platform 枚举仅 `Kimi`（PlatformFilter 保留 all/kimi），schema 与命令层 platform 维度泛化不动。
-- M5 魔法工具（S1-3）：mihomo v1.19.32 sidecar（`src-tauri/binaries/` 固定版本，sha256 与官方 release digest 一致；externalBin + tauri-plugin-shell；setup 拉起 / `RunEvent::Exit` 回收；external-controller 仅回环、端口顺延 9090-9100 持久化到 proxy_setting；首跑生成仅回环初始配置模板）、`crates/core/mihomo/client.rs` RESTful 客户端（代理组/切节点/并发测速/模式切换/存活探测）、`crates/core/sysproxy.rs` 系统代理（RegistryIo/ProxyStateStore seam，开启备份现场/关闭无损还原/崩溃残留自检恢复，测试全 mock 不碰真实注册表）、proxy 命令六条（`commands/proxy.rs`：`proxy_status` 字段级降级、`select_proxy`、`test_delay`、`set_system_proxy`、`switch_rule_mode`、`recover_system_proxy`；退出钩子先恢复系统代理再杀 sidecar）、前端 `views/Proxy.vue` + `stores/proxy.ts`（4s 轮询、乐观更新失败回滚、残留提示恢复流）。
-- M5-07 节点导入：core `crates/core/src/subscription/`（share 分享链接解析 / content 内容形态识别逐条容错 / fetch 订阅拉取 15s 超时 + UA 伪装 / config 托管节点文件 toogl-nodes.yaml + config.yaml 一次性接线 proxy-providers file provider，用户手写配置不自动改）、`MihomoClient::reload_config` 热重载、桌面端 `commands/subscription.rs` 四条命令（`subscription_status` / `subscription_set_url` / `subscription_update` / `import_share_text`；并发拒绝互斥、失败保留旧节点记 last_error、手动节点优先并集去重；更新流程接线检查前置、reload 失败原子回滚节点文件保持文件与内核一致）+ 24h 定时更新循环（setup spawn，sidecar 未运行记 last_error 跳过）、前端 Proxy.vue「节点订阅」卡 + `stores/subscription.ts` + `api/subscription.ts`。
-- 加固：`CommandError.kind` 为 ts-rs 导出枚举 `CommandErrorKind`（snake_case），前端 `api/errors.ts` 白名单用生成类型，前后端无双写。
-- 已知占位：用量估值单价表全 0（estimated_cost 恒 0，待官方价格确认，将迁移为 M6 可配置项）。
-- 人工验收待补：Kimi `/coding/v1/usages` 格式为推测待真机确认；S1-3 真机联调（sidecar 拉起无孤儿进程、切节点出口 IP 变化、系统代理注册表实测、强杀后残留自检恢复）；M5-07 真机联调（订阅链接导入后节点出现在代理组、断网刷新保留旧节点并告警、粘贴导入与订阅并集去重）；CSP 生产包验证（`pnpm tauri build` 后安装包运行无资源加载报错，dev 窗口已验证）。
+## AI 助手协作边界
+
+- **语言**：对话始终使用中文；新增或修改的代码注释、文档和说明也使用中文。代码中的 API、包名、命令、文件名、协议字段和已有英文标识必须保留原始拼写。
+- **终端**：当前开发环境是 Windows 11，终端是 Windows Terminal 中的 PowerShell。命令必须兼容实际 PowerShell 版本，不假定支持 `&&` 等版本相关语法；不要直接使用 Bash heredoc、`export`、`source` 等语法。文件路径含空格时正确引用，文本读写使用 UTF-8 并保留仓库 LF 约定。优先使用专用工具读取、搜索和编辑文件。
+- **文件权限**：在当前项目目录及子目录内，为完成任务可以直接新增、修改和删除文件，无需逐次确认；此授权不包含绕过 Git 限制或操作项目外的文件。修改前先读取相关内容，不擅自覆盖用户已有改动，不顺手清理无关文件或全仓格式化。
+- **Git 边界**：允许只读查看 `git status`、`git diff`、`git log`、`git show`。其他写入暂存区、历史、分支或远端的操作必须先获得用户明确同意，包括 `add`、`commit`、`restore`、`reset`、`checkout`、`switch`、`clean`、`stash`、`merge`、`rebase`、`pull`、`push` 等。
+- **项目启动**：默认用户已启动项目，不自行运行 `pnpm dev`、`pnpm tauri dev`、预览服务器或其他长期服务。确需启动、停止或重启项目时，先说明原因并获得用户同意；不得擅自终止用户进程、清理端口占用或换端口重复启动。
+- **浏览器验证**：默认不使用浏览器打开页面、截图或自动化交互；只有用户明确要求时才执行。UI、真实 Tauri IPC 和桌面行为由用户在现有运行环境中手动验证，助手提供具体操作、预期结果和需要反馈的信息。可以自行运行不启动项目的类型检查、lint、单元测试和构建；不得借测试修改真实凭据、代理配置或用户数据。
+- **变更与反馈**：先定位受影响的调用方、类型和测试，再编辑；完成后优先运行与改动直接相关且不启动项目的检查。若需要真实环境才能确认，明确区分已验证事实与待用户验证项，不用推测结果替代验证。
+
+## Testing & QA
+
+- **前端**：Vitest + jsdom，测试邻近源码命名 `*.spec.ts`；重点是 Pinia 状态转换、看板卡片加载隔离、偏好迁移、轮询/失败回滚、错误处理与 IPC 契约。组件测试从简，避免脆弱快照。
+- **Rust**：源码内 `#[cfg(test)]` 单元测试；HTTP 使用 wiremock，数据库使用隔离 SQLite；注册表使用内存 mock，不修改真实系统现场。覆盖订阅解析与更新、代理状态、持久化及恢复、网络诊断边界和 Temp 扫描安全边界。
+- **类型检查**：`models/mod.rs` 的导出测试生成当前类型并更新 bindings；改 models 后生成结果保留在工作区供审阅，不自动执行 Git 提交。CI 在 Rust 测试后执行 `git diff --exit-code -- packages/core-types/bindings` 防止漂移。
+- **门禁**：Windows CI 执行 ESLint、Prettier、Vitest、rustfmt、Clippy（`-D warnings`）、Rust 全量测试与 bindings 一致性检查，最后构建 Tauri 安装包。当前未配置覆盖率数值门槛或 e2e 套件。
+- **真实能力验收**：涉及 sidecar、系统代理、订阅、网络命令、Temp 扫描、CSP 的变更需由用户在真实桌面验证启动/退出、恢复、失败保留旧数据和安全边界。助手按 `docs/02-开发计划.md` 的人工验收步骤提供操作说明，不擅自启动项目或浏览器。

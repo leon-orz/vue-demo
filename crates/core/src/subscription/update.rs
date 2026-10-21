@@ -245,7 +245,7 @@ async fn count_nodes(store: &ProxySettingStore, key: &str) -> u32 {
     }
 }
 
-/// 上次成功更新时间格式：RFC3339 UTC 秒级（与 quota_snapshot 的 fetched_at 一致）
+/// 上次成功更新时间格式：RFC3339 UTC 秒级。
 fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }

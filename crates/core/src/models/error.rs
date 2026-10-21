@@ -104,13 +104,6 @@ impl From<sqlx::Error> for CommandError {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn export_bindings() {
-        CommandErrorKind::export().unwrap();
-        CommandError::export().unwrap();
-    }
-
     #[test]
     fn serializes_to_contract_json() {
         let err = CommandError::unauthorized("请检查 API key");

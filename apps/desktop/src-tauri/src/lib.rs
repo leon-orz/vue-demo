@@ -1,5 +1,5 @@
 mod commands;
-// pub：ProxyCoreState 等接口供项3命令层使用，当前仅 setup 装配引用
+// sidecar 状态由 setup 装配，并由代理命令层调用。
 pub mod sidecar;
 
 use tauri::Manager as _;
@@ -9,15 +9,8 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
-            commands::usage::scan_usage_logs,
-            commands::usage::usage_summary,
-            commands::usage::usage_by_project,
-            commands::usage::usage_by_model,
-            commands::usage::usage_series,
-            commands::usage::quota_refresh,
-            commands::usage::quota_latest,
-            commands::usage::platform_account_get,
-            commands::usage::platform_account_set,
+            commands::preferences::app_preferences_get,
+            commands::preferences::app_preferences_set,
             commands::proxy::proxy_status,
             commands::proxy::select_proxy,
             commands::proxy::test_delay,
@@ -28,28 +21,25 @@ pub fn run() {
             commands::subscription::subscription_set_url,
             commands::subscription::subscription_update,
             commands::subscription::import_share_text,
+            commands::system_tools::system_tools_information,
+            commands::system_tools::system_tools_scan_cleanup,
+            commands::system_tools::system_tools_diagnose_network,
+            commands::system_tools::system_tools_flush_dns,
         ])
         .setup(|app| {
-            // app data 目录只解析一次，四个模块状态共享；解析失败的错误文案也统一
+            // app data 目录只解析一次，各模块状态共享；解析失败的错误文案也统一
             let app_data_dir = app
                 .path()
                 .app_data_dir()
                 .map_err(|e| format!("无法解析 app data 目录: {e}"));
 
-            // 用量模块状态：初始化失败不 panic，降级为错误态（命令统一返回 unavailable），
-            // 应用其余模块照常可用
-            let state = match &app_data_dir {
-                Ok(dir) => {
-                    match tauri::async_runtime::block_on(commands::usage::UsageState::new(
-                        dir.clone(),
-                    )) {
-                        Ok(state) => state,
-                        Err(e) => commands::usage::UsageState::unavailable(e),
-                    }
-                }
-                Err(e) => commands::usage::UsageState::unavailable(e.clone()),
+            let preferences = match &app_data_dir {
+                Ok(dir) => tauri::async_runtime::block_on(
+                    commands::preferences::PreferenceState::new(dir.clone()),
+                ),
+                Err(e) => commands::preferences::PreferenceState::unavailable(e.clone()),
             };
-            app.manage(state);
+            app.manage(preferences);
 
             // S1-3：拉起 mihomo sidecar（端口顺延 + 首跑配置生成 + 失败降级，见 sidecar.rs）。
             let proxy_state = match &app_data_dir {

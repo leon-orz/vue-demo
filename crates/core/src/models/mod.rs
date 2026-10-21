@@ -1,43 +1,68 @@
 pub mod error;
+pub mod preferences;
 pub mod proxy;
 pub mod subscription;
 pub mod sysproxy;
-pub mod usage;
+pub mod system_tools;
 
 pub use error::{CommandError, CommandErrorKind};
+pub use preferences::{AppPreferences, ThemeMode};
 pub use proxy::{
     DelayStatus, MihomoVersion, NodeDelayResult, ProxiesSummary, ProxyGroup, ProxyGroupType,
     ProxyNode, ProxySelection, ProxyStatus, RuleMode,
 };
 pub use subscription::{ImportResult, SubscriptionInfo};
 pub use sysproxy::{SystemProxyCheck, SystemProxyStatus};
-pub use usage::{
-    LogFileCursor, Platform, PlatformAccountInfo, PlatformAccountInput, PlatformFilter,
-    PlatformScanReport, QuotaSnapshot, ScanReport, UsageEvent, UsageGroup, UsagePoint, UsageRange,
-    UsageSeries, UsageSummary, UsageTotals,
-};
+pub use system_tools::{CleanupScan, NetworkDiagnostic, NetworkRepairResult, SystemInformation};
 
 #[cfg(test)]
 mod tests {
-    /// bindings 完整性：packages/core-types/bindings/ 下每个生成文件都必须在
-    /// index.ts 里有对应 re-export（防止新增模型忘记登记；CI 另有 git diff 校验生成物）
+    /// 先显式导出全部模型，再生成包入口；不依赖并行测试或既有文件的执行顺序。
     #[test]
-    fn bindings_index_covers_all_generated_files() {
-        let dir = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../packages/core-types/bindings"
-        );
-        let index =
-            std::fs::read_to_string(format!("{dir}/index.ts")).expect("无法读取 bindings/index.ts");
-        for entry in std::fs::read_dir(dir).expect("无法读取 bindings 目录") {
-            let name = entry.unwrap().file_name().into_string().unwrap();
-            if name.ends_with(".ts") && name != "index.ts" {
-                let stem = name.strip_suffix(".ts").unwrap();
-                assert!(
-                    index.contains(&format!("'./{stem}'")),
-                    "index.ts 缺少对 {name} 的 re-export"
-                );
-            }
+    fn export_bindings_index() {
+        use super::*;
+        use ts_rs::TS;
+
+        macro_rules! export_types {
+            ($($ty:ty),+ $(,)?) => {{
+                $(<$ty>::export().unwrap();)+
+                vec![$(<$ty>::name()),+]
+            }};
         }
+        let mut names = export_types![
+            AppPreferences,
+            CommandError,
+            CommandErrorKind,
+            DelayStatus,
+            ImportResult,
+            crate::subscription::content::NodeFailure,
+            MihomoVersion,
+            NodeDelayResult,
+            ProxiesSummary,
+            ProxyGroup,
+            ProxyGroupType,
+            ProxyNode,
+            ProxySelection,
+            ProxyStatus,
+            RuleMode,
+            SubscriptionInfo,
+            SystemProxyCheck,
+            CleanupScan,
+            NetworkDiagnostic,
+            NetworkRepairResult,
+            SystemInformation,
+            ThemeMode,
+        ];
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packages/core-types/bindings");
+        names.sort();
+        let mut index = String::from("// 本文件由 Rust 类型导出测试生成，请勿手改。\n");
+        for name in names {
+            index.push_str(&format!("export type {{ {name} }} from './{name}'\n"));
+        }
+        // 同目录临时文件 + rename，完整性检查不会读到写入一半的入口。
+        let temp = dir.join("index.ts.tmp");
+        std::fs::write(&temp, index).unwrap();
+        std::fs::rename(temp, dir.join("index.ts")).unwrap();
     }
 }

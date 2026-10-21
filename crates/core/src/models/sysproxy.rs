@@ -25,15 +25,3 @@ pub struct SystemProxyCheck {
     /// 残留时本软件开启前保存的旧值（供提示与无损恢复）；无残留为 None
     pub previous: Option<SystemProxyStatus>,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// 运行本测试即重新生成 packages/core-types/bindings（CI 校验生成物与仓库一致）
-    #[test]
-    fn export_bindings() {
-        SystemProxyStatus::export().unwrap();
-        SystemProxyCheck::export().unwrap();
-    }
-}

@@ -30,16 +30,5 @@ export default defineConfig({
   build: {
     // 仅支持 Windows，WebView2 跟随系统 Chromium 内核
     target: 'chrome120',
-    // ECharts 按需引入后独立分包仍约 510 kB，属可接受体积，放宽告警阈值消除噪音
-    chunkSizeWarningLimit: 600,
-    rollupOptions: {
-      output: {
-        // Vite 8（Rolldown）：ECharts 单独分包，避免拖慢首屏（Kimi 页已做路由懒加载）
-        advancedChunks: {
-          groups: [{ name: 'echarts', test: /node_modules[\\/]echarts/ }],
-        },
-      },
-    },
-    // TODO(S1-3)：mihomo 相关模块接入后视体积再评估分包
   },
 })

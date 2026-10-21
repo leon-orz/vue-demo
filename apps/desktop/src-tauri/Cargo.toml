@@ -21,14 +21,13 @@ serde_json = "1"
 toogl-core = { path = "../../../crates/core" }
 # sidecar 就绪轮询的 sleep（tauri::async_runtime 无 sleep 再导出）；
 # sync：ProxyCommandState 惰性启动自检的 OnceCell 语义
-tokio = { version = "1", features = ["time", "sync"] }
+tokio = { version = "1", features = ["time", "sync", "net"] }
 # 订阅定时更新（M5-07）：last_updated 的 RFC3339 生成与超期判断（与 core 同款 feature 集）
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 
 [target.'cfg(windows)'.dependencies]
-# 启动期 WebView2 探测失败时的原生提示框（main.rs）；版本与依赖树中 tauri 同款，避免重复编译
-windows-sys = { version = "0.61.2", features = ["Win32_UI_WindowsAndMessaging"] }
-
+# 启动期 WebView2 探测失败时的原生提示框（main.rs）。
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 [dev-dependencies]
 # sidecar.rs 单测：临时目录（配置生成）+ tokio 测试运行时（降级态探测）
 tempfile = "3"

@@ -3,28 +3,23 @@ name = "toogl-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Toogl 共享核心：数据模型 / 平台适配器 / 数据源 / 密钥存储 / mihomo 客户端"
+description = "Toogl 工具业务核心：数据模型 / 代理管理"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 ts-rs = "10"
-# sync: 扫描互斥锁；rt: proxy_setting 的专用 current_thread runtime（SqliteProxyStateStore）
-tokio = { version = "1", features = ["sync", "rt"] }
+# proxy_setting 的专用 current_thread runtime（SqliteProxyStateStore）
+tokio = { version = "1", features = ["rt"] }
 # mihomo 批量测速的并发上限（buffer_unordered 限流，0.3 已在依赖树锁定）
 futures = "0.3"
-# 注意：keyring 3 默认不启用任何平台后端（会静默退化为 mock 内存存储），必须显式启用。
-# 桌面端仅 Windows（NF-14）→ windows-native；hub（Linux）按开发计划 1.3 走加密文件存储，不用系统钥匙串
-keyring = { version = "3", features = ["windows-native"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
-dirs = "6"
 # mihomo external-controller 随机 secret 生成（v4 随机 UUID，simple 形态即 32 位 hex）
 uuid = { version = "1", features = ["v4"] }
 # 订阅/分享链接导入（subscription 模块）：mihomo 配置 YAML 结构化读写、
-# ss/vless 等分享链接的 base64 段解码与 URL query 解析（base64 与 url 均已在依赖树中锁定）
 serde_yaml = "0.9"
 base64 = "0.22"
 url = "2"
@@ -33,7 +28,8 @@ url = "2"
 # （两个版本均已在依赖树锁定：winreg 经 embed-resource、windows-sys 0.59 经 winreg）
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Networking_WinInet"] }
+windows-sys = { version = "0.59", features = ["Win32_Networking_WinInet", "Win32_Storage_FileSystem", "Win32_System_SystemInformation"] }
+tokio = { version = "1", features = ["rt", "net", "time"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

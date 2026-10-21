@@ -35,16 +35,3 @@ pub struct ImportResult {
     /// 逐条失败明细（坏行不拖垮整体，返回给前端展示）
     pub failures: Vec<NodeFailure>,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// 运行本测试即重新生成 packages/core-types/bindings（CI 校验生成物与仓库一致）
-    #[test]
-    fn export_bindings() {
-        SubscriptionInfo::export().unwrap();
-        ImportResult::export().unwrap();
-        NodeFailure::export().unwrap();
-    }
-}

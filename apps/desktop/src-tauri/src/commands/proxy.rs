@@ -1,5 +1,5 @@
 //! M5 魔法工具命令层（S1-3 项3）：薄壳，业务逻辑在 toogl_core（mihomo / sysproxy /
-//! proxy_setting）。前端对应封装见 apps/desktop/src/api/proxy.ts。
+//! proxy_setting）。前端对应封装见 apps/desktop/src/modules/proxy/api.ts。
 //! 所有命令统一返回 Result<T, CommandError>，前端 invoke 抛出的即 CommandError JSON。
 //!
 //! 桌面端仅 Windows（NF-14）：系统代理直接装配 WinRegIo 真实注册表实现，

@@ -1,16 +1,12 @@
 //! Toogl 共享核心 crate。
-//! 桌面端 Tauri commands 与 hub HTTP 接口都是本 crate 的薄壳；
-//! TS 类型由 ts-rs 从 models 生成（见 models::usage 的 export 测试）。
+//! 桌面端 Tauri commands 是本 crate 的薄壳，各工具业务按模块组织。
 
-pub mod adapters;
-pub mod datasource;
 pub mod db;
-pub mod keystore;
-pub mod kimicode;
-pub mod logs;
 pub mod mihomo;
 pub mod models;
+pub mod preferences;
 pub mod proxy_setting;
 pub mod subscription;
 pub mod sysproxy;
-pub mod usage;
+#[cfg(windows)]
+pub mod system_tools;

@@ -3,7 +3,7 @@
 //! 当前记录 mihomo sidecar external-controller 实际端口与鉴权密钥（secret）、
 //! mixed-port 实际端口（冲突顺延后的真实值）、记住的节点选择与规则模式；系统代理状态备份（sysproxy::ProxyBackupState
 //! JSON 的 SQLite 版 ProxyStateStore）也基于本表实现（见 [`SqliteProxyStateStore`]）。
-//! 桌面端与 hub 各自连自己的库文件，本模块只做纯 KV 读写。
+//! 与其他工具共用桌面端 toogl.db，本模块只管理代理配置和现场备份。
 
 use std::path::Path;
 
@@ -52,7 +52,7 @@ pub struct ProxySettingStore {
 
 impl ProxySettingStore {
     /// 打开（必要时创建）数据库并执行 schema 迁移（幂等），WAL 模式。
-    /// 与 UsageService 连同一库文件也安全（WAL + busy_timeout 多连接共存）。
+    /// 与 mihomo sidecar 共用应用数据库，使用 WAL 和 busy_timeout 支持多连接。
     pub async fn connect(db_path: impl AsRef<Path>) -> Result<Self, sqlx::Error> {
         let options = SqliteConnectOptions::new()
             .filename(db_path.as_ref())
@@ -252,7 +252,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("t.db");
         let a = ProxySettingStore::connect(&path).await.unwrap();
-        // 第二个连接（模拟 UsageService 与 sidecar 各连一次同一库文件）
+        // 第二个连接（模拟 sidecar 与代理命令层各连一次同一库文件）
         let b = ProxySettingStore::connect(&path).await.unwrap();
         a.set(KEY_CONTROLLER_PORT, "9090").await.unwrap();
         assert_eq!(

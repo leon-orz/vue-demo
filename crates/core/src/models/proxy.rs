@@ -177,22 +177,6 @@ pub struct MihomoVersion {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// 运行本测试即重新生成 packages/core-types/bindings（CI 校验生成物与仓库一致）
-    #[test]
-    fn export_bindings() {
-        DelayStatus::export().unwrap();
-        ProxyNode::export().unwrap();
-        ProxyGroupType::export().unwrap();
-        ProxyGroup::export().unwrap();
-        ProxiesSummary::export().unwrap();
-        NodeDelayResult::export().unwrap();
-        RuleMode::export().unwrap();
-        MihomoVersion::export().unwrap();
-        ProxySelection::export().unwrap();
-        ProxyStatus::export().unwrap();
-    }
-
     #[test]
     fn rule_mode_str_roundtrip() {
         for mode in [RuleMode::Rule, RuleMode::Global, RuleMode::Direct] {

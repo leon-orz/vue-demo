@@ -6,14 +6,14 @@
 //! - external-controller 端口：首跑探测顺延（9090 被占则 9091…9100）写入新建配置模板；
 //!   非首跑以已有配置的 external-controller 端口为准（用户可手改），配置端口被占且
 //!   为本工具模板时顺延写回（用户手写配置不动）。实际端口写入 proxy_setting 表
-//!   （toogl_core::proxy_setting，与 UsageService 同一库文件）；
+//!   （与 proxy_setting 共用应用数据库）；
 //! - mixed-port 同样顺延（7890…7900），但只在首跑生成配置模板时生效；实际生效值
 //!   （已有配置以文件解析为准）同样写入 proxy_setting；
 //! - 首次运行生成最小可用配置（app_data_dir/mihomo/config.yaml，external-controller
 //!   带随机 secret 鉴权），已有配置不覆盖；旧版模板缺 secret 时自动补写升级，
 //!   用户手写配置（无模板标记）不动；
 //! - 拉起失败（二进制缺失 / 进程秒退 / 就绪超时）降级为错误态：proxy 模块不可用，
-//!   应用其余部分照常（参照 commands/usage.rs UsageState 的降级模式）。
+//!   应用其余部分照常。
 //!
 //! 状态经 [`ProxyCoreState`] 暴露给项3命令层（节点切换 / 系统代理开关 / 规则组切换）；
 //! 系统代理启动自检（sysproxy startup_check）的装配也在项3做，本模块只提供 sidecar 侧。
@@ -334,7 +334,7 @@ async fn start_inner(app: &AppHandle, app_data_dir: &Path) -> Result<ProxyCore, 
         }
     });
 
-    // 实际端口写入设置表（与 UsageService 同一 toogl.db；WAL + busy_timeout 多连接安全）。
+    // 实际端口写入 proxy_setting（与应用数据库共享 WAL + busy_timeout）。
     // 持久化失败不视为拉起失败——本轮运行端口已在内存里，仅影响下次启动前的外部查询。
     match ProxySettingStore::connect(app_data_dir.join("toogl.db")).await {
         Ok(store) => {
@@ -472,16 +472,14 @@ fn pick_port_in(start: u16, end: u16, probe: impl Fn(u16) -> bool) -> Option<u16
 }
 
 /// 首跑最小可用配置模板（纯函数便于单测）。
-/// 分流规则模板与节点导入是后续任务（《02-开发计划》M5 节），这里只保证内核可启动、
-/// RESTful API 可用、全部流量直连兜底。
+/// 节点与订阅配置由导入功能接入；初始配置提供直连兜底规则。
 /// external-controller 带随机 secret 鉴权：本机其他进程不知道密钥即无法控制内核。
 fn render_initial_config(controller_port: u16, mixed_port: u16, secret: &str) -> String {
     format!(
         r#"# ============================================================
 # Toogl（图格）mihomo 初始配置模板
 # 本文件由 Toogl 首次运行自动生成，可手工修改；已存在时不会被覆盖。
-# 分流规则模板与节点导入是后续功能，当前仅一个 Selector 骨架组兜底直连。
-# ============================================================
+# 初始配置提供节点选择组和直连兜底规则，导入的节点由 Toogl 接入。
 
 # 本地混合代理端口（HTTP + SOCKS5 入口），仅监听本机回环，不暴露到局域网；
 # 端口由 Toogl 首跑时在 7890~7900 探测顺延，被占会顺延到空闲端口
@@ -500,10 +498,10 @@ secret: {secret}
 mode: rule
 log-level: warning
 
-# 节点列表：后续经「节点导入」功能填充（分享链接 / 订阅）
+# 节点列表由 Toogl 的订阅或手动导入写入托管文件，并自动接入本配置。
 proxies: []
 
-# 代理组骨架：导入节点后把节点名加入本组 proxies 列表即可在软件里切换
+# 代理组骨架：Toogl 导入节点后自动接入节点选择组。
 proxy-groups:
   - name: 节点选择
     type: select
