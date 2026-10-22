@@ -38,15 +38,32 @@ pub async fn run_update(
     client: &MihomoClient,
     updating: &AtomicBool,
 ) -> Result<SubscriptionInfo, CommandError> {
-    if updating
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        return Err(CommandError::internal("订阅正在更新中，请稍后再试"));
+    let _guard = UpdateGuard::try_lock(updating)?;
+    run_update_locked(store, work_dir, config_path, client).await
+}
+
+/// 更新标志的 RAII 守卫。命令/定时任务可能在 await 期间被取消；用 Drop 复位，
+/// 避免一次取消把模块永久卡在「更新中」。
+struct UpdateGuard<'a> {
+    updating: &'a AtomicBool,
+}
+
+impl<'a> UpdateGuard<'a> {
+    fn try_lock(updating: &'a AtomicBool) -> Result<Self, CommandError> {
+        if updating
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Err(CommandError::internal("订阅正在更新中，请稍后再试"));
+        }
+        Ok(Self { updating })
     }
-    let result = run_update_locked(store, work_dir, config_path, client).await;
-    updating.store(false, Ordering::SeqCst);
-    result
+}
+
+impl Drop for UpdateGuard<'_> {
+    fn drop(&mut self) {
+        self.updating.store(false, Ordering::SeqCst);
+    }
 }
 
 async fn run_update_locked(
@@ -102,7 +119,7 @@ async fn run_update_locked(
         }
         return Err(e);
     }
-    // 出口处 updating 标志随即由调用方复位，返回的状态直接按 false 报
+    // guard 在返回或取消时复位标志，状态读取使用本次流程已完成的 false。
     read_status(store, false).await
 }
 
@@ -118,15 +135,8 @@ pub async fn import_merge(
     text: &str,
 ) -> Result<ImportResult, CommandError> {
     let parsed = parse_nodes_text(text)?;
-    if updating
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        return Err(CommandError::internal("订阅正在更新中，请稍后再试"));
-    }
-    let result = import_merge_locked(store, work_dir, config_path, client, parsed).await;
-    updating.store(false, Ordering::SeqCst);
-    result
+    let _guard = UpdateGuard::try_lock(updating)?;
+    import_merge_locked(store, work_dir, config_path, client, parsed).await
 }
 
 async fn import_merge_locked(
@@ -643,6 +653,16 @@ mod tests {
     }
 
     // ---- 错误映射与辅助函数 ----
+
+    #[test]
+    fn update_guard_releases_flag_when_dropped() {
+        let updating = AtomicBool::new(false);
+        {
+            let _guard = UpdateGuard::try_lock(&updating).unwrap();
+            assert!(updating.load(Ordering::SeqCst));
+        }
+        assert!(!updating.load(Ordering::SeqCst));
+    }
 
     #[test]
     fn subscription_error_maps_to_command_error() {

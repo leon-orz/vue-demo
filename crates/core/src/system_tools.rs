@@ -8,10 +8,13 @@ use std::net::{SocketAddr, TcpStream};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::MetadataExt;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
-use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+use windows_sys::Win32::System::SystemInformation::{
+    GetSystemDirectoryW, GlobalMemoryStatusEx, MEMORYSTATUSEX,
+};
+
 use winreg::enums::HKEY_LOCAL_MACHINE;
 use winreg::RegKey;
 
@@ -20,10 +23,23 @@ use crate::models::{
 };
 
 const MAX_SCAN_ENTRIES: usize = 50_000;
+const MAX_SCAN_DURATION: Duration = Duration::from_secs(5);
 const DNS_PROBE: &str = "example.com:443";
 
 fn wide(value: &OsStr) -> Vec<u16> {
     value.encode_wide().chain(Some(0)).collect()
+}
+
+fn system_directory() -> Result<PathBuf, CommandError> {
+    // 使用 Windows API 获取系统目录，避免信任可被进程环境覆盖的 SystemRoot。
+    let mut buffer = vec![0u16; 260];
+    let length = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) };
+    if length == 0 || length as usize >= buffer.len() {
+        return Err(CommandError::unavailable("无法确定 Windows 系统目录"));
+    }
+    Ok(PathBuf::from(String::from_utf16_lossy(
+        &buffer[..length as usize],
+    )))
 }
 
 pub fn system_information() -> Result<SystemInformation, CommandError> {
@@ -52,8 +68,7 @@ pub fn system_information() -> Result<SystemInformation, CommandError> {
     let processor: String = processor_key
         .get_value("ProcessorNameString")
         .unwrap_or_default();
-    let root = std::env::var_os("SystemDrive").unwrap_or_else(|| "C:".into());
-    let root = PathBuf::from(format!("{}\\", root.to_string_lossy()));
+    let root = system_directory()?;
     let mut free = 0u64;
     let mut total = 0u64;
     if unsafe {
@@ -93,6 +108,23 @@ pub fn scan_temp_directory() -> Result<CleanupScan, CommandError> {
 }
 
 fn scan_temp_directory_at(temp: &std::path::Path) -> Result<CleanupScan, CommandError> {
+    scan_temp_directory_at_with_limits(temp, MAX_SCAN_ENTRIES, MAX_SCAN_DURATION)
+}
+
+fn scan_temp_directory_at_with_limits(
+    temp: &std::path::Path,
+    max_entries: usize,
+    max_duration: Duration,
+) -> Result<CleanupScan, CommandError> {
+    scan_temp_directory_at_with_limits_and_clock(temp, max_entries, max_duration, Instant::now)
+}
+
+fn scan_temp_directory_at_with_limits_and_clock(
+    temp: &std::path::Path,
+    max_entries: usize,
+    max_duration: Duration,
+    now: impl Fn() -> Instant,
+) -> Result<CleanupScan, CommandError> {
     let metadata = std::fs::symlink_metadata(temp)
         .map_err(|e| CommandError::unavailable(format!("无法访问当前用户临时目录: {e}")))?;
     if metadata.file_attributes()
@@ -105,6 +137,7 @@ fn scan_temp_directory_at(temp: &std::path::Path) -> Result<CleanupScan, Command
     }
     let root = std::fs::canonicalize(temp)
         .map_err(|e| CommandError::unavailable(format!("无法访问当前用户临时目录: {e}")))?;
+    let started = now();
     let mut pending = vec![root.clone()];
     let mut result = CleanupScan {
         files: 0,
@@ -114,6 +147,10 @@ fn scan_temp_directory_at(temp: &std::path::Path) -> Result<CleanupScan, Command
     let mut visited = 0usize;
 
     while let Some(directory) = pending.pop() {
+        if now().duration_since(started) >= max_duration {
+            result.skipped_entries += 1;
+            return Ok(result);
+        }
         let entries = match std::fs::read_dir(directory) {
             Ok(entries) => entries,
             Err(_) => {
@@ -123,7 +160,7 @@ fn scan_temp_directory_at(temp: &std::path::Path) -> Result<CleanupScan, Command
         };
         for entry in entries {
             visited += 1;
-            if visited > MAX_SCAN_ENTRIES {
+            if visited > max_entries || now().duration_since(started) >= max_duration {
                 result.skipped_entries += 1;
                 return Ok(result);
             }
@@ -189,9 +226,7 @@ pub async fn diagnose_network() -> NetworkDiagnostic {
 }
 
 pub fn flush_dns() -> Result<NetworkRepairResult, CommandError> {
-    let system_root = std::env::var_os("SystemRoot")
-        .ok_or_else(|| CommandError::unavailable("无法确定 Windows 系统目录"))?;
-    let executable = PathBuf::from(system_root).join("System32\\ipconfig.exe");
+    let executable = system_directory()?.join("ipconfig.exe");
     let output = std::process::Command::new(executable)
         .arg("/flushdns")
         .output()
@@ -210,9 +245,13 @@ pub fn flush_dns() -> Result<NetworkRepairResult, CommandError> {
 }
 #[cfg(test)]
 mod tests {
-    use super::scan_temp_directory_at;
+    use super::{
+        scan_temp_directory_at, scan_temp_directory_at_with_limits,
+        scan_temp_directory_at_with_limits_and_clock,
+    };
+    use std::cell::Cell;
     use std::fs;
-
+    use std::time::{Duration, Instant};
     #[test]
     fn scan_counts_files_without_modifying_them() {
         let temp = tempfile::tempdir().unwrap();
@@ -249,5 +288,46 @@ mod tests {
         symlink_dir(target, &link).unwrap();
 
         assert!(scan_temp_directory_at(&link).is_err());
+    }
+
+    #[test]
+    fn scan_reports_partial_result_at_entry_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("first.bin"), b"first").unwrap();
+        fs::write(temp.path().join("second.bin"), b"second").unwrap();
+
+        let result =
+            scan_temp_directory_at_with_limits(temp.path(), 1, Duration::from_secs(5)).unwrap();
+
+        assert_eq!(result.files, 1);
+        assert_eq!(result.skipped_entries, 1);
+    }
+
+    #[test]
+    fn scan_returns_partial_result_when_cooperative_time_budget_expires() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("first.bin"), b"first").unwrap();
+        let started = Instant::now();
+        let calls = Cell::new(0);
+        let now = || {
+            let call = calls.get();
+            calls.set(call + 1);
+            if call < 2 {
+                started
+            } else {
+                started + Duration::from_secs(1)
+            }
+        };
+
+        let result = scan_temp_directory_at_with_limits_and_clock(
+            temp.path(),
+            50,
+            Duration::from_millis(500),
+            now,
+        )
+        .unwrap();
+
+        assert_eq!(result.files, 0);
+        assert_eq!(result.skipped_entries, 1);
     }
 }

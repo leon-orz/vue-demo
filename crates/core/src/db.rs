@@ -44,6 +44,8 @@ pub async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         )
         .execute(&mut *tx)
         .await?;
+        // 历史库可能只登记版本但缺少实际表，因此不能仅凭版本行跳过 SQL。
+        // 所有登记脚本都须可重放；新增一次性数据迁移前先调整迁移协议。
         for stmt in migration.sql.split(';') {
             let stmt = stmt.trim();
             if !stmt.is_empty() {

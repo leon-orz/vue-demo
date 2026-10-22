@@ -41,7 +41,7 @@ pub fn run() {
             };
             app.manage(preferences);
 
-            // S1-3：拉起 mihomo sidecar（端口顺延 + 首跑配置生成 + 失败降级，见 sidecar.rs）。
+            // 内核启动失败转换为不可用状态，保留其余模块和设置的使用路径。
             let proxy_state = match &app_data_dir {
                 Ok(dir) => {
                     tauri::async_runtime::block_on(sidecar::start(app.handle(), dir.clone()))
@@ -50,7 +50,7 @@ pub fn run() {
             };
             app.manage(proxy_state);
 
-            // S1-3 项3：proxy 命令层状态（proxy_setting 库 + 系统代理管理器）。
+            // 代理命令状态：持久化设置和系统代理管理器。
             // 系统代理启动自检（上次异常退出残留识别）不在此执行——此处经 block_on
             // 驱动处于 runtime 上下文，直接调 manager 同步方法会嵌套 runtime panic；
             // 自检改为首个 proxy_status / set_system_proxy 调用时经 spawn_blocking
@@ -64,7 +64,7 @@ pub fn run() {
             };
             app.manage(proxy_cmd_state);
 
-            // M5-07：订阅命令层状态（proxy_setting KV + mihomo 工作目录路径 + 更新互斥标志）。
+            // 订阅状态共享节点目录与更新互斥，不由前端页面持有后台任务。
             let subscription_state = match &app_data_dir {
                 Ok(dir) => tauri::async_runtime::block_on(
                     commands::subscription::SubscriptionCommandState::new(dir.clone()),
@@ -86,8 +86,8 @@ pub fn run() {
 
     app.run(|app_handle, event| {
         if let tauri::RunEvent::Exit = event {
-            // S1-3 项3 退出钩子：本次运行由我们开启的系统代理先无损恢复（有备份即视为
-            // 我们开的），保证正常退出不留残留；失败只记录不阻塞，异常退出由启动自检兜底。
+            // 本次开启代理产生的备份用于恢复；失败保留备份，供下次启动检查。
+            // 恢复失败不能被当作已经恢复成功。
             // 先恢复系统代理再杀 mihomo：避免应用流量还指着已退出的本地代理端口。
             if let Some(state) = app_handle.try_state::<commands::proxy::ProxyCommandState>() {
                 state.cleanup_system_proxy_on_exit();
