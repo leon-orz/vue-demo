@@ -9,6 +9,6 @@ import './style.css'
 const app = createApp(App)
 app.use(createPinia())
 app.use(router)
-// 应用主题偏好（含跟随系统）后再挂载，避免首屏闪烁
+// init 同步应用缓存主题后异步读取数据库；不等待 IPC，避免阻塞首屏挂载。
 void useSettingsStore().init()
 app.mount('#app')

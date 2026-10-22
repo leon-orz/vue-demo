@@ -163,6 +163,32 @@ describe('节点切换', () => {
     await store.selectNode('Proxy', '节点A')
     expect(mocks.selectProxy).not.toHaveBeenCalled()
   })
+
+  it('节点切换等待旧轮询后重新读取事实源，丢弃动作前响应', async () => {
+    const store = useProxyStore()
+    await store.refresh()
+
+    // 项目当前 lib 不包含 ES2024，沿用既有 deferred 构造方式。
+    let resolveOldRefresh!: (status: ProxyStatus) => void
+    const oldStatusRequest = new Promise<ProxyStatus>((resolve) => {
+      resolveOldRefresh = resolve
+    })
+    const afterSwitch = statusOf()
+    afterSwitch.proxies!.groups[0].now = '节点B'
+    mocks.proxyStatus.mockReturnValueOnce(oldStatusRequest).mockResolvedValueOnce(afterSwitch)
+
+    const oldRefresh = store.refresh()
+    const switching = store.selectNode('Proxy', '节点B')
+    await Promise.resolve()
+    expect(mocks.proxyStatus).toHaveBeenCalledTimes(2)
+    expect(store.groups[0].now).toBe('节点B')
+
+    resolveOldRefresh(statusOf())
+    await Promise.all([oldRefresh, switching])
+
+    expect(mocks.proxyStatus).toHaveBeenCalledTimes(3)
+    expect(store.groups[0].now).toBe('节点B')
+  })
 })
 
 describe('延迟测试', () => {

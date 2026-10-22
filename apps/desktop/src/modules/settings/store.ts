@@ -9,8 +9,25 @@ import * as api from './api'
 const THEME_KEY = 'toogl.settings.theme'
 const THEMES: readonly ThemeMode[] = ['light', 'dark', 'system']
 
+// 缓存不是事实源：WebView 禁止存储或配额耗尽时仍必须能够启动、读取 SQLite。
+function readCachedTheme(): string | null {
+  try {
+    return localStorage.getItem(THEME_KEY)
+  } catch {
+    return null
+  }
+}
+
+function cacheTheme(value: ThemeMode) {
+  try {
+    localStorage.setItem(THEME_KEY, value)
+  } catch {
+    // 仅丢失下次启动的首屏加速；数据库保存结果不受影响。
+  }
+}
+
 function cachedTheme(): ThemeMode {
-  const value = localStorage.getItem(THEME_KEY)
+  const value = readCachedTheme()
   return THEMES.includes(value as ThemeMode) ? (value as ThemeMode) : 'system'
 }
 
@@ -36,11 +53,11 @@ export const useSettingsStore = defineStore('settings', () => {
     try {
       const saved = await api.getAppPreferences()
       if (saved) theme.value = saved.theme
-      else if (localStorage.getItem(THEME_KEY) !== null) {
+      else if (readCachedTheme() !== null) {
         // 仅数据库无记录时迁移旧值，避免缓存覆盖已有偏好。
         await api.setAppPreferences({ theme: theme.value })
       }
-      localStorage.setItem(THEME_KEY, theme.value)
+      cacheTheme(theme.value)
       applyTheme()
       initialized = true
     } catch (err) {
@@ -72,7 +89,7 @@ export const useSettingsStore = defineStore('settings', () => {
       if (error.value) return
       await api.setAppPreferences({ theme: value })
       theme.value = value
-      localStorage.setItem(THEME_KEY, value)
+      cacheTheme(value)
       applyTheme()
     } catch (err) {
       error.value = toCommandError(err)

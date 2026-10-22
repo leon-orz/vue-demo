@@ -46,8 +46,9 @@ export const useProxyStore = defineStore('proxy', () => {
   const leftoverDismissed = ref(false)
 
   let timer: ReturnType<typeof setInterval> | null = null
-  /** refresh 在飞标记：上一次未完成时跳过本轮，避免慢请求（>4s）逐轮叠加 */
-  let refreshing = false
+  /** 刷新请求与动作共享序号；动作开始后，动作前发出的旧响应不得覆盖新事实。 */
+  let refreshSequence = 0
+  let refreshPromise: Promise<void> | null = null
 
   const groups = computed(() => status.value?.proxies?.groups ?? [])
   /** sidecar 可用 = 存活探测通过且启动无错误；不可用时页面整体降级 */
@@ -61,17 +62,30 @@ export const useProxyStore = defineStore('proxy', () => {
   )
   const testingAll = computed(() => testingGroups.value['*'] === true)
 
-  /** 拉取一次聚合状态；失败只记 loadError，不清空已有状态（保持旧数据可读）。在飞则跳过本轮 */
-  async function refresh() {
-    if (refreshing) return
-    refreshing = true
+  /** 拉取一次聚合状态；动作后的强制刷新会等待旧请求，再发新请求对齐事实源。 */
+  async function refresh(force = false) {
+    if (refreshPromise) {
+      if (!force) return refreshPromise
+      await refreshPromise
+    }
+    const sequence = refreshSequence
+    const request = (async () => {
+      try {
+        const next = await api.proxyStatus()
+        // 动作开始后，动作前发出的响应只允许完成等待，不得覆盖动作后的状态。
+        if (sequence === refreshSequence) {
+          status.value = next
+          loadError.value = null
+        }
+      } catch (err) {
+        if (sequence === refreshSequence) loadError.value = toCommandError(err)
+      }
+    })()
+    refreshPromise = request
     try {
-      status.value = await api.proxyStatus()
-      loadError.value = null
-    } catch (err) {
-      loadError.value = toCommandError(err)
+      await request
     } finally {
-      refreshing = false
+      if (refreshPromise === request) refreshPromise = null
     }
   }
 
@@ -100,11 +114,12 @@ export const useProxyStore = defineStore('proxy', () => {
     const prev = g?.now
     if (!g || prev === node) return
     selecting.value[group] = true
+    refreshSequence++
     actionError.value = null
     g.now = node
     try {
       await api.selectProxy(group, node)
-      await refresh()
+      await refresh(true)
     } catch (err) {
       // 回滚时重读 status（轮询可能已整体替换对象，闭包里的旧 g 已不在树上）；
       // 仅当页面上仍显示乐观值时才回滚，避免覆盖轮询已对齐的事实源
@@ -124,11 +139,12 @@ export const useProxyStore = defineStore('proxy', () => {
     const key = group ?? '*'
     if (testingGroups.value[key]) return
     testingGroups.value[key] = true
+    refreshSequence++
     actionError.value = null
     try {
       const results = await api.testDelay(group ?? null)
       // 先刷新对齐事实源，再把测速结果合并覆盖（/proxies 的 history 可能滞后于测速响应）
-      await refresh()
+      await refresh(true)
       mergeDelayResults(results)
     } catch (err) {
       actionError.value = toCommandError(err)
@@ -155,12 +171,13 @@ export const useProxyStore = defineStore('proxy', () => {
   async function setSystemProxy(enabled: boolean) {
     if (togglingSystemProxy.value) return
     togglingSystemProxy.value = true
+    refreshSequence++
     actionError.value = null
     const prev = status.value?.system_proxy?.enabled
     if (status.value?.system_proxy) status.value.system_proxy.enabled = enabled
     try {
       await api.setSystemProxy(enabled)
-      await refresh()
+      await refresh(true)
     } catch (err) {
       if (status.value?.system_proxy && prev !== undefined) {
         status.value.system_proxy.enabled = prev
@@ -175,12 +192,13 @@ export const useProxyStore = defineStore('proxy', () => {
   async function switchMode(mode: RuleMode) {
     if (switchingMode.value || status.value?.rule_mode === mode) return
     switchingMode.value = true
+    refreshSequence++
     actionError.value = null
     const prev = status.value?.rule_mode ?? null
     if (status.value) status.value.rule_mode = mode
     try {
       await api.switchRuleMode(mode)
-      await refresh()
+      await refresh(true)
     } catch (err) {
       if (status.value) status.value.rule_mode = prev
       actionError.value = toCommandError(err)

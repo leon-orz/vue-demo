@@ -107,4 +107,29 @@ describe('软件偏好', () => {
     expect(store.theme).toBe('system')
     expect(api.setAppPreferences).toHaveBeenCalledWith({ theme: 'system' })
   })
+
+  it('主题缓存不可访问时仍读取数据库并应用主题', async () => {
+    stubMatchMedia()
+    api.getAppPreferences.mockResolvedValue({ theme: 'dark' })
+    const get = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+      throw new DOMException('缓存不可访问', 'SecurityError')
+    })
+    const set = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new DOMException('缓存不可写入', 'QuotaExceededError')
+    })
+    try {
+      const store = useSettingsStore()
+      await store.init()
+      expect(store.theme).toBe('dark')
+      expect(document.documentElement.classList.contains('dark')).toBe(true)
+      expect(store.error).toBeNull()
+      await store.setTheme('light')
+      expect(store.theme).toBe('light')
+      expect(document.documentElement.classList.contains('dark')).toBe(false)
+      expect(api.setAppPreferences).toHaveBeenCalledWith({ theme: 'light' })
+    } finally {
+      get.mockRestore()
+      set.mockRestore()
+    }
+  })
 })
