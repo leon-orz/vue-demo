@@ -34,6 +34,9 @@ export const toolModules: readonly ToolModule[] = [
       component: () => import('@/modules/network-diagnostics/NetworkDiagnostics.vue'),
       meta: { title: '网络诊断' },
     },
+    dashboard: defineAsyncComponent(
+      () => import('@/modules/network-diagnostics/components/OverviewCard.vue'),
+    ),
   },
   {
     id: 'system-status',
@@ -45,6 +48,9 @@ export const toolModules: readonly ToolModule[] = [
       component: () => import('@/modules/system-status/SystemStatus.vue'),
       meta: { title: '系统状态' },
     },
+    dashboard: defineAsyncComponent(
+      () => import('@/modules/system-status/components/OverviewCard.vue'),
+    ),
   },
   {
     id: 'storage',
@@ -56,6 +62,7 @@ export const toolModules: readonly ToolModule[] = [
       component: () => import('@/modules/storage/Storage.vue'),
       meta: { title: '空间维护' },
     },
+    dashboard: defineAsyncComponent(() => import('@/modules/storage/components/OverviewCard.vue')),
   },
 ]
 
