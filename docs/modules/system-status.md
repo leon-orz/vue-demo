@@ -14,6 +14,7 @@
 - `useSystemInformation.ts`：快照、结构化错误、加载锁、系统盘比例和读取动作；空间页共享相同 composable 实现。
 - `api.ts`：`getSystemInformation` → `invoke('system_tools_information')`。
 - `components/SystemInformationPanel.vue`：信息展示、空/加载/失败状态和手动刷新。
+- `components/OverviewCard.vue`：看板摘要卡；挂载读取一次，与详情页同一条 IPC，不轮询。
 - `apps/desktop/src-tauri/src/commands/system_tools.rs`：IPC 薄层，将同步查询放入 `spawn_blocking`。
 - `crates/core/src/system_tools.rs`：Windows API、注册表查询和 DTO 组装。
 - `crates/core/src/models/system_tools.rs`：`SystemInformation` 序列化模型。

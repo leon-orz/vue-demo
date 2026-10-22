@@ -17,6 +17,7 @@
 - `api.ts`：把无参数扫描 API 映射到 Tauri command。
 - `components/CleanupPanel.vue`：展示扫描范围、计数、跳过项和错误。
 - `components/OptimizationPanel.vue`：只提供人工检查建议与安全边界文案。
+- `components/OverviewCard.vue`：看板摘要卡；盘空间挂载读取，扫描仍由用户点击触发。
 - `apps/desktop/src/modules/system-status/useSystemInformation.ts`：向空间页面提供系统盘只读快照计算，不复制后端查询。
 - `apps/desktop/src-tauri/src/commands/system_tools.rs`：通过 `spawn_blocking` 调用同步扫描核心。
 - `crates/core/src/system_tools.rs`：解析当前用户 Temp、检查重解析点、遍历、计数和限制。

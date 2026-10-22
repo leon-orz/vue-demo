@@ -16,6 +16,7 @@ DNS 刷新只执行 Windows 系统目录中的 `ipconfig.exe`，参数固定为 
 - `useNetworkDiagnostics.ts`：保存诊断/修复结果、错误和在途锁；重复点击直接忽略。
 - `api.ts`：把无参数 API 一一映射到 Tauri `invoke`。
 - `components/NetworkPanel.vue`：展示边界、结果和结构化错误，不实现业务判断。
+- `components/OverviewCard.vue`：看板摘要卡；持有会话内结果，不与页面共享实例，挂载不自动诊断。
 - `apps/desktop/src-tauri/src/commands/system_tools.rs`：在 Tauri 命令层编排异步调用；同步 DNS 刷新通过 `spawn_blocking`。
 - `crates/core/src/system_tools.rs`：固定目标、超时、TCP 探测和固定系统命令的事实实现。
 
