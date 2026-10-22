@@ -54,7 +54,7 @@ cargo test -p toogl-core export_bindings
 
 ## 目录
 
-- `apps/desktop/src/app`：模块登记、路由与应用壳组件；`AppSidebar` 负责分组，`SidebarLink` 统一链接样式
+- `apps/desktop/src/app`：固定路由、业务登记及应用壳导航组件
 - `apps/desktop/src/modules/dashboard`：首页状态看板布局
 - `apps/desktop/src/modules/proxy`：魔法工具，管理 mihomo、节点、系统代理和订阅
 - `apps/desktop/src/modules/network-diagnostics`：固定网络诊断和 DNS 刷新
@@ -80,5 +80,6 @@ cargo test -p toogl-core export_bindings
 - [产品需求文档](docs/01-需求文档.md)：产品定位、模块范围、行为和验收
 - [开发计划](docs/02-开发计划.md)：架构、数据链路、分阶段开发和质量门禁
 - [模块开发指南](docs/03-模块开发指南.md)：模块登记、边界、测试和完成标准
+- [模块维护索引](AGENTS.md#模块维护入口与文档链路)：每个模块的代码入口、调用链、生命周期、安全边界和验证方式
 
 代码与文档冲突时，以当前代码和实际验收结果为准；计划功能不得写成已完成。

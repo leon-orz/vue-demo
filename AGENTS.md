@@ -10,10 +10,29 @@ Toogl（图格）是面向 Windows 10/11 的个人桌面实用工具箱，采用
 
 产品范围与分阶段目标见 `docs/01-需求文档.md`、`docs/02-开发计划.md`；模块接入规则见 `docs/03-模块开发指南.md`。
 
+## 模块维护入口与文档链路
+
+修改前按以下链路阅读：本文件的全局约束 → 对应模块指南 → 指南列出的代码入口与行为测试。
+产品范围以 [需求文档](docs/01-需求文档.md) 为准，架构与阶段见 [开发计划](docs/02-开发计划.md)，接入规则见 [模块开发指南](docs/03-模块开发指南.md)。模块指南记录当前代码事实，不把目标方案写成已完成。
+
+| 维护范围               | 指南                                            | 主要边界                               |
+| ---------------------- | ----------------------------------------------- | -------------------------------------- |
+| 应用壳、导航、桌面装配 | [应用壳](docs/modules/app-shell.md)             | 固定入口、模块路由、IPC 注册、启动退出 |
+| 首页看板               | [看板](docs/modules/dashboard.md)               | 模块摘要和当前未实现的隔离能力         |
+| 魔法工具               | [代理与内核](docs/modules/proxy.md)             | mihomo、状态、节点、系统代理恢复       |
+| 节点来源               | [订阅与导入](docs/modules/subscription.md)      | 解析、合并、后台更新、文件与内核一致性 |
+| 网络诊断               | [网络诊断](docs/modules/network-diagnostics.md) | 固定目标、超时、DNS 刷新               |
+| 系统状态               | [系统状态](docs/modules/system-status.md)       | Windows 只读信息和空间信息复用         |
+| 空间维护               | [空间维护](docs/modules/storage.md)             | Temp 限定路径、重解析点和扫描上限      |
+| 软件设置               | [设置](docs/modules/settings.md)                | 偏好、主题缓存、初始化与失败恢复       |
+| 公共基础设施           | [基础设施](docs/modules/infrastructure.md)      | UI、错误、格式化、SQLite、生成类型     |
+
+修改功能时同步所属指南及相关需求；修改全局约束时更新本文件。注释只解释不变量、边界和原因，避免逐行复述实现。新增模块必须增加指南并登记本索引；移动或删除文件时同步指南路径和验证命令。未实际运行的桌面行为必须注明待验收。
+
 ## Architecture & Data Flow
 
 - **调用链**：Vue 页面 → 模块 Pinia Store / `api.ts` → Tauri `invoke` → `apps/desktop/src-tauri/src/commands/` → `crates/core` → SQLite、Windows API、mihomo 或固定外部 API。
-- **模块边界**：`apps/desktop/src/app/modules.ts` 是导航、路由与可选看板卡的唯一登记点。模块拥有自己的页面、API、Store、配置和摘要卡；看板只遍历摘要卡，不复制业务公式。软件设置只管理全局偏好，不依赖业务模块。
+- **模块边界**：`apps/desktop/src/app/modules.ts` 是业务导航、业务路由与可选看板卡的唯一登记点；看板与设置固定路由在 `app/router.ts`。模块拥有自己的页面、API、状态和可选摘要卡；看板不复制业务公式。软件设置只管理全局偏好，不依赖业务模块。
 - **魔法工具链**：`sidecar.rs` 管理 mihomo 生命周期，`mihomo/client.rs` 调 REST API；`sysproxy.rs` 在开启前备份系统代理，关闭/退出时恢复。退出必须先恢复系统代理，再结束 sidecar。
 - **订阅链**：拉取/粘贴 → 解析 → 与手动节点合并（同名手动优先）→ 托管文件 → mihomo 热重载。更新互斥，热重载失败回滚节点文件；24 小时后台更新由 Rust 管理，不依赖页面打开。
 - **基础工具**：网络诊断只执行固定 DNS/TCP 检查和固定 `ipconfig.exe /flushdns`；系统状态只读 Windows API；空间维护只扫描当前用户 `%LOCALAPPDATA%\\Temp`，第一阶段不删除文件。
@@ -27,7 +46,7 @@ Toogl（图格）是面向 Windows 10/11 的个人桌面实用工具箱，采用
 
 | 路径                                                 | 修改职责                                                       |
 | ---------------------------------------------------- | -------------------------------------------------------------- |
-| `apps/desktop/src/app/`                              | 模块登记、路由、调用契约                                       |
+| `apps/desktop/src/app/`                              | 模块登记、路由与应用壳导航组件                                 |
 | `apps/desktop/src/modules/dashboard/`                | 首页状态看板布局，不持有业务公式                               |
 | `apps/desktop/src/modules/proxy/`                    | 魔法工具：代理、节点、订阅和导入                               |
 | `apps/desktop/src/modules/network-diagnostics/`      | 固定网络诊断和 DNS 刷新                                        |
