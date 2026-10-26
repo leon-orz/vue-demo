@@ -3,7 +3,6 @@ pub mod preferences;
 pub mod proxy;
 pub mod subscription;
 pub mod sysproxy;
-pub mod system_tools;
 
 pub use error::{CommandError, CommandErrorKind};
 pub use preferences::{AppPreferences, ThemeMode};
@@ -13,7 +12,6 @@ pub use proxy::{
 };
 pub use subscription::{ImportResult, SubscriptionInfo};
 pub use sysproxy::{SystemProxyCheck, SystemProxyStatus};
-pub use system_tools::{CleanupScan, NetworkDiagnostic, NetworkRepairResult, SystemInformation};
 
 #[cfg(test)]
 mod tests {
@@ -47,10 +45,6 @@ mod tests {
             RuleMode,
             SubscriptionInfo,
             SystemProxyCheck,
-            CleanupScan,
-            NetworkDiagnostic,
-            NetworkRepairResult,
-            SystemInformation,
             ThemeMode,
         ];
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

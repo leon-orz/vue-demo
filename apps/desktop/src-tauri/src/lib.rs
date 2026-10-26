@@ -21,10 +21,6 @@ pub fn run() {
             commands::subscription::subscription_set_url,
             commands::subscription::subscription_update,
             commands::subscription::import_share_text,
-            commands::system_tools::system_tools_information,
-            commands::system_tools::system_tools_scan_cleanup,
-            commands::system_tools::system_tools_diagnose_network,
-            commands::system_tools::system_tools_flush_dns,
         ])
         .setup(|app| {
             // app data 目录只解析一次，各模块状态共享；解析失败的错误文案也统一

@@ -4,30 +4,22 @@
 
 Toogl（图格）是面向 Windows 10/11 的个人桌面实用工具箱，采用 Tauri 2 + Vue 3 + TypeScript + Rust。
 
-产品以 mihomo **魔法工具** 为核心，同时提供首页状态看板、网络诊断、系统状态、空间维护和软件设置。看板展示各模块状态并提供入口，不复制模块业务逻辑。
+产品以 mihomo **魔法工具** 为核心，同时提供首页状态看板和软件设置；信息订阅、AI 网关、系统优化、网络优化、开发环境为规划中占位入口（侧栏"规划中"分组，占位页无业务逻辑）。看板展示各模块状态并提供入口，不复制模块业务逻辑。
 
 当前代理只使用 Windows 系统代理，不做 TUN。新增模块采用编译时登记，避免提前引入运行时插件、远程 Hub 或空业务抽象。
 
-产品范围与分阶段目标见 `docs/01-需求文档.md`、`docs/02-开发计划.md`；模块接入规则见 `docs/03-模块开发指南.md`。
+## 文档链路
 
-## 模块维护入口与文档链路
+按需阅读：产品边界 → docs/01；架构与实现事实 → docs/02；进度与验收 → docs/03；接入规则 → docs/04。每个功能模块目录有 `README.md` 记录本模块逻辑链路；本文件只放全局约束，与模块 README 不重复。
 
-修改前按以下链路阅读：本文件的全局约束 → 对应模块指南 → 指南列出的代码入口与行为测试。
-产品范围以 [需求文档](docs/01-需求文档.md) 为准，架构与阶段见 [开发计划](docs/02-开发计划.md)，接入规则见 [模块开发指南](docs/03-模块开发指南.md)。模块指南记录当前代码事实，不把目标方案写成已完成。
+| 文档                                        | 主要边界                                         |
+| ------------------------------------------- | ------------------------------------------------ |
+| [产品说明](docs/01-产品说明.md)             | 各模块用户能力、安全边界、明确不做               |
+| [架构与数据流](docs/02-架构与数据流.md)     | 目录职责、IPC 清单、启动退出、订阅链、持久化     |
+| [开发状态与方向](docs/03-开发状态与方向.md) | 实现进度、待人工验收清单、已知缺口、开发方向     |
+| [模块开发指南](docs/04-模块开发指南.md)     | 新增模块步骤、API/Store 规则、测试要求、完成标准 |
 
-| 维护范围               | 指南                                            | 主要边界                               |
-| ---------------------- | ----------------------------------------------- | -------------------------------------- |
-| 应用壳、导航、桌面装配 | [应用壳](docs/modules/app-shell.md)             | 固定入口、模块路由、IPC 注册、启动退出 |
-| 首页看板               | [看板](docs/modules/dashboard.md)               | 模块摘要和当前未实现的隔离能力         |
-| 魔法工具               | [代理与内核](docs/modules/proxy.md)             | mihomo、状态、节点、系统代理恢复       |
-| 节点来源               | [订阅与导入](docs/modules/subscription.md)      | 解析、合并、后台更新、文件与内核一致性 |
-| 网络诊断               | [网络诊断](docs/modules/network-diagnostics.md) | 固定目标、超时、DNS 刷新               |
-| 系统状态               | [系统状态](docs/modules/system-status.md)       | Windows 只读信息和空间信息复用         |
-| 空间维护               | [空间维护](docs/modules/storage.md)             | Temp 限定路径、重解析点和扫描上限      |
-| 软件设置               | [设置](docs/modules/settings.md)                | 偏好、主题缓存、初始化与失败恢复       |
-| 公共基础设施           | [基础设施](docs/modules/infrastructure.md)      | UI、错误、格式化、SQLite、生成类型     |
-
-修改功能时同步所属指南及相关需求；修改全局约束时更新本文件。注释只解释不变量、边界和原因，避免逐行复述实现。新增模块必须增加指南并登记本索引；移动或删除文件时同步指南路径和验证命令。未实际运行的桌面行为必须注明待验收。
+文档记录当前代码事实，不把目标方案写成已完成；代码与文档冲突时以代码为准。修改功能时同步所属模块 README 与相关 docs；移动或删除文件时同步引用路径。未实际运行的桌面行为必须注明待验收。
 
 ## Architecture & Data Flow
 
@@ -35,30 +27,28 @@ Toogl（图格）是面向 Windows 10/11 的个人桌面实用工具箱，采用
 - **模块边界**：`apps/desktop/src/app/modules.ts` 是业务导航、业务路由与可选看板卡的唯一登记点；看板与设置固定路由在 `app/router.ts`。模块拥有自己的页面、API、状态和可选摘要卡；看板不复制业务公式。软件设置只管理全局偏好，不依赖业务模块。
 - **魔法工具链**：`sidecar.rs` 管理 mihomo 生命周期，`mihomo/client.rs` 调 REST API；`sysproxy.rs` 在开启前备份系统代理，关闭/退出时恢复。退出必须先恢复系统代理，再结束 sidecar。
 - **订阅链**：拉取/粘贴 → 解析 → 与手动节点合并（同名手动优先）→ 托管文件 → mihomo 热重载。更新互斥，热重载失败回滚节点文件；24 小时后台更新由 Rust 管理，不依赖页面打开。
-- **基础工具**：网络诊断只执行固定 DNS/TCP 检查和固定 `ipconfig.exe /flushdns`；系统状态只读 Windows API；空间维护只扫描当前用户 `%LOCALAPPDATA%\\Temp`，第一阶段不删除文件。
+- **系统能力边界**：系统能力（进程、注册表、网络修复）使用固定可执行文件和参数，修改类动作必须先展示对象并逐次确认；不接受前端传入任意命令、路径或脚本。规划中的系统优化、网络优化、开发环境模块沿用此边界。
 - **持久化**：`<app_data_dir>/toogl.db` 存代理数据、订阅节点元信息和偏好；`PreferenceStore` 使用类型化 namespace JSON。主题 localStorage 仅作首屏缓存；控制密钥存放在内核配置和代理设置中。
 - **跨语言类型**：Rust `models/` 是单一来源，ts-rs 生成 `@toogl/core-types`。`packages/core-types/bindings/`（含 `index.ts`）禁止手改。
 
-- **组件与封装**：`App.vue` 只装配布局；侧栏组件位于 `app/components/`。基础工具各有独立页面、`api.ts`、局部 `use*.ts` 和展示面板；系统信息查询允许供空间维护复用。`components/ui/` 仅基础 UI，`shared/` 为跨模块交互，`lib/` 为纯函数。不要复制实现或添加空服务层。
-- **实现进度**：六个入口已拆分；看板四张摘要卡（魔法工具、网络诊断、系统状态、空间维护）与卡片级错误边界已实现，桌面降级与重试表现待人工验收，不能写成已验收。各模块主目录有 README 辅助功能理解。
+- **组件与封装**：`App.vue` 只装配布局；侧栏组件位于 `app/components/`。各模块有独立页面、`api.ts`、局部 `use*.ts` 和展示面板。`components/ui/` 仅基础 UI，`shared/` 为跨模块交互，`lib/` 为纯函数。不要复制实现或添加空服务层。
+- **实现进度**：已实现魔法工具、看板壳与设置；信息订阅、AI 网关、系统优化、网络优化、开发环境已登记为"规划中"占位入口（`modules/planned/PlannedPlaceholder.vue`，不发起业务 IPC），进度与验收见 `docs/03-开发状态与方向.md`，不能写成已实现或已验收。各模块主目录有 README 辅助功能理解。
 
 ## Key Directories
 
-| 路径                                                 | 修改职责                                                       |
-| ---------------------------------------------------- | -------------------------------------------------------------- |
-| `apps/desktop/src/app/`                              | 模块登记、路由与应用壳导航组件                                 |
-| `apps/desktop/src/modules/dashboard/`                | 首页状态看板布局，不持有业务公式                               |
-| `apps/desktop/src/modules/proxy/`                    | 魔法工具：代理、节点、订阅和导入                               |
-| `apps/desktop/src/modules/network-diagnostics/`      | 固定网络诊断和 DNS 刷新                                        |
-| `apps/desktop/src/modules/system-status/`            | Windows 与设备只读信息                                         |
-| `apps/desktop/src/modules/storage/`                  | Temp 目录扫描和空间概况                                        |
-| `apps/desktop/src/modules/settings/`                 | Toogl 主题和版本信息                                           |
-| `apps/desktop/src/shared/`、`components/ui/`、`lib/` | 通用错误、UI 和格式化能力                                      |
-| `apps/desktop/src-tauri/src/`                        | 桌面生命周期、commands、mihomo sidecar 管理                    |
-| `crates/core/src/`                                   | mihomo、subscription、代理设置、系统代理、系统工具、偏好和模型 |
-| `crates/core/migrations/`                            | 只追加的 SQLite schema 迁移                                    |
-| `packages/core-types/`                               | Rust 生成的前端类型                                            |
-| `docs/`                                              | 产品、开发计划、模块接入和验收约定                             |
+| 路径                                                 | 修改职责                                             |
+| ---------------------------------------------------- | ---------------------------------------------------- |
+| `apps/desktop/src/app/`                              | 模块登记、路由与应用壳导航组件                       |
+| `apps/desktop/src/modules/dashboard/`                | 首页状态看板布局，不持有业务公式                     |
+| `apps/desktop/src/modules/planned/`                  | 五个规划中模块的共用占位页                           |
+| `apps/desktop/src/modules/proxy/`                    | 魔法工具：代理、节点、订阅和导入                     |
+| `apps/desktop/src/modules/settings/`                 | Toogl 主题和版本信息                                 |
+| `apps/desktop/src/shared/`、`components/ui/`、`lib/` | 通用错误、UI 和格式化能力                            |
+| `apps/desktop/src-tauri/src/`                        | 桌面生命周期、commands、mihomo sidecar 管理          |
+| `crates/core/src/`                                   | mihomo、subscription、代理设置、系统代理、偏好和模型 |
+| `crates/core/migrations/`                            | 只追加的 SQLite schema 迁移                          |
+| `packages/core-types/`                               | Rust 生成的前端类型                                  |
+| `docs/`                                              | 产品说明、架构数据流、进度方向和模块接入规范         |
 
 ## Development Commands
 
@@ -96,20 +86,20 @@ cargo test -p toogl-core subscription
 - **依赖注入**：沿用显式 trait 接缝，例如系统代理 `RegistryIo` / `ProxyStateStore`；测试注入内存实现，不为统一形式增加服务容器或事件总线。
 - **偏好**：通过 `PreferenceStore` 的类型化读写扩展配置，不向前端开放任意键写入。读取失败不能当作首次使用并写回默认值；旧值仅在迁移成功后删除。
 - **数据库**：新增 `crates/core/migrations/NNNN_description.sql` 并追加 `db.rs::MIGRATIONS`，版本递增、保留历史。每个迁移及版本登记在同一事务中；语句需幂等。执行器按分号切分，SQL 字符串字面量内禁止分号。
-- **系统能力边界**：网络诊断使用固定目标和超时；系统命令使用固定可执行文件和参数；空间扫描限制 Temp 路径并跳过重解析点；不接受前端传入任意命令、路径或脚本。
+- **系统能力边界**：系统能力（进程、注册表、网络修复）使用固定可执行文件和参数，修改类动作必须先展示对象并逐次确认；不接受前端传入任意命令、路径或脚本。
 - **UI**：Tailwind CSS 4 + shadcn-vue（new-york / neutral）+ lucide。不引入 Naive UI、Element Plus 或 UnoCSS。
 
 ## Important Files
 
 - `apps/desktop/src/main.ts`：Vue、Pinia、路由与主题初始化；`app/router.ts` 使用 hash 路由。
-- `apps/desktop/src/app/modules.ts`：首页看板、魔法工具、网络诊断、系统状态、空间维护和设置的入口登记；新增模块步骤见 `docs/03-模块开发指南.md`。
+- `apps/desktop/src/app/modules.ts`：全部模块入口登记（魔法工具已实现；五个规划中模块以 `planned` 占位）；实现规划模块时替换组件、删 `planned`、补看板卡，步骤见 `docs/04-模块开发指南.md`。
 - `apps/desktop/src-tauri/src/main.rs`：WebView2 启动探测；`lib.rs`：状态装配、命令登记、后台任务和退出清理。
 - `apps/desktop/src-tauri/src/sidecar.rs`：端口探测、进程管理、`MIHOMO_EXPECTED_VERSION`。
 - `crates/core/src/models/mod.rs`、`models/error.rs`：模型导出入口和统一错误契约。
 - `crates/core/src/db.rs`、`preferences.rs`、`proxy_setting.rs`：迁移、普通偏好和代理设置。
 - `apps/desktop/src-tauri/tauri.conf.json`、`apps/desktop/vite.config.ts`、`apps/desktop/vitest.config.ts`、`apps/desktop/tsconfig.app.json`：构建、CSP、测试和类型规则。
 - `package.json`、`pnpm-workspace.yaml`、`Cargo.toml`：工作区与命令；`.github/workflows/ci.yml`：Windows CI 质量门禁。
-- `docs/01-需求文档.md`、`docs/02-开发计划.md`：产品范围、架构、阶段和人工验收；代码与文档冲突时以代码为准，文档不得把计划功能标为完成。
+- `docs/01-产品说明.md`、`docs/02-架构与数据流.md`、`docs/03-开发状态与方向.md`：产品范围、架构事实和人工验收；代码与文档冲突时以代码为准，文档不得把计划功能标为完成。
 
 ## Runtime/Tooling Preferences
 
@@ -131,7 +121,7 @@ cargo test -p toogl-core subscription
 ## Testing & QA
 
 - **前端**：Vitest + jsdom，测试邻近源码命名 `*.spec.ts`；重点是 Pinia 状态转换、看板卡片加载隔离、偏好迁移、轮询/失败回滚、错误处理与 IPC 契约。组件测试从简，避免脆弱快照。
-- **Rust**：源码内 `#[cfg(test)]` 单元测试；HTTP 使用 wiremock，数据库使用隔离 SQLite；注册表使用内存 mock，不修改真实系统现场。覆盖订阅解析与更新、代理状态、持久化及恢复、网络诊断边界和 Temp 扫描安全边界。
+- **Rust**：源码内 `#[cfg(test)]` 单元测试；HTTP 使用 wiremock，数据库使用隔离 SQLite；注册表使用内存 mock，不修改真实系统现场。覆盖订阅解析与更新、代理状态、持久化及恢复。
 - **类型检查**：`models/mod.rs` 的导出测试生成当前类型并更新 bindings；改 models 后生成结果保留在工作区供审阅，不自动执行 Git 提交。CI 在 Rust 测试后执行 `git diff --exit-code -- packages/core-types/bindings` 防止漂移。
 - **门禁**：Windows CI 执行 ESLint、Prettier、Vitest、rustfmt、Clippy（`-D warnings`）、Rust 全量测试与 bindings 一致性检查，最后构建 Tauri 安装包。当前未配置覆盖率数值门槛或 e2e 套件。
-- **真实能力验收**：涉及 sidecar、系统代理、订阅、网络命令、Temp 扫描、CSP 的变更需由用户在真实桌面验证启动/退出、恢复、失败保留旧数据和安全边界。助手按 `docs/02-开发计划.md` 的人工验收步骤提供操作说明，不擅自启动项目或浏览器。
+- **真实能力验收**：涉及 sidecar、系统代理、订阅、系统能力修改、CSP 的变更需由用户在真实桌面验证启动/退出、恢复、失败保留旧数据和安全边界。助手按 `docs/03-开发状态与方向.md` 的待人工验收清单提供操作说明，不擅自启动项目或浏览器。

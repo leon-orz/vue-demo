@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { dashboardModules } from '@/app/modules'
 import ModuleCardBoundary from './components/ModuleCardBoundary.vue'
+import PlannedModulesCard from './components/PlannedModulesCard.vue'
 </script>
 
 <template>
@@ -14,6 +15,7 @@ import ModuleCardBoundary from './components/ModuleCardBoundary.vue'
       <ModuleCardBoundary v-for="module in dashboardModules" :key="module.id" :title="module.title">
         <component :is="module.dashboard" />
       </ModuleCardBoundary>
+      <PlannedModulesCard />
     </section>
   </div>
 </template>

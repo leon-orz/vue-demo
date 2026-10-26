@@ -1,4 +1,4 @@
-import { Cpu, HardDrive, Network, WandSparkles } from '@lucide/vue'
+import { WandSparkles, Rss, Bot, Gamepad2, Globe, Terminal } from '@lucide/vue'
 import { defineAsyncComponent, type Component } from 'vue'
 import type { RouteRecordRaw } from 'vue-router'
 
@@ -9,6 +9,8 @@ interface ToolModule {
   icon: Component
   route: RouteRecordRaw
   dashboard?: Component
+  /** 规划中模块：路由指向占位页，不提供看板卡。 */
+  planned?: string
 }
 
 export const toolModules: readonly ToolModule[] = [
@@ -25,45 +27,69 @@ export const toolModules: readonly ToolModule[] = [
     dashboard: defineAsyncComponent(() => import('@/modules/proxy/components/OverviewCard.vue')),
   },
   {
-    id: 'network-diagnostics',
-    title: '网络诊断',
-    icon: Network,
+    id: 'feed',
+    title: '信息订阅',
+    icon: Rss,
+    planned: '聚合 RSS 源与 GitHub 动态，统一查看你关心的更新。',
     route: {
-      path: '/network-diagnostics',
-      name: 'network-diagnostics',
-      component: () => import('@/modules/network-diagnostics/NetworkDiagnostics.vue'),
-      meta: { title: '网络诊断' },
+      path: '/feed',
+      name: 'feed',
+      component: () => import('@/modules/planned/PlannedPlaceholder.vue'),
+      meta: { title: '信息订阅' },
     },
-    dashboard: defineAsyncComponent(
-      () => import('@/modules/network-diagnostics/components/OverviewCard.vue'),
-    ),
   },
   {
-    id: 'system-status',
-    title: '系统状态',
-    icon: Cpu,
+    id: 'ai-gateway',
+    title: 'AI 网关',
+    icon: Bot,
+    planned: '查看 AI 模型聚合中转平台的用量统计与健康状态，等待平台 API 确定。',
     route: {
-      path: '/system-status',
-      name: 'system-status',
-      component: () => import('@/modules/system-status/SystemStatus.vue'),
-      meta: { title: '系统状态' },
+      path: '/ai-gateway',
+      name: 'ai-gateway',
+      component: () => import('@/modules/planned/PlannedPlaceholder.vue'),
+      meta: { title: 'AI 网关' },
     },
-    dashboard: defineAsyncComponent(
-      () => import('@/modules/system-status/components/OverviewCard.vue'),
-    ),
   },
   {
-    id: 'storage',
-    title: '空间维护',
-    icon: HardDrive,
+    id: 'system-tuning',
+    title: '系统优化',
+    icon: Gamepad2,
+    planned: '游戏设置检查与后台占用清理，所有修改先展示范围、逐项确认。',
     route: {
-      path: '/storage',
-      name: 'storage',
-      component: () => import('@/modules/storage/Storage.vue'),
-      meta: { title: '空间维护' },
+      path: '/system-tuning',
+      name: 'system-tuning',
+      component: () => import('@/modules/planned/PlannedPlaceholder.vue'),
+      meta: { title: '系统优化' },
     },
-    dashboard: defineAsyncComponent(() => import('@/modules/storage/components/OverviewCard.vue')),
+  },
+  {
+    id: 'network-tuning',
+    title: '网络优化',
+    icon: Globe,
+    planned: '网络状态检测与修复，修复动作逐项确认后执行。',
+    route: {
+      path: '/network-tuning',
+      name: 'network-tuning',
+      component: () => import('@/modules/planned/PlannedPlaceholder.vue'),
+      meta: { title: '网络优化' },
+    },
+  },
+  {
+    id: 'dev-environment',
+    title: '开发环境',
+    icon: Terminal,
+    planned: '端口冲突检测、残留进程定位与处理等开发环境辅助。',
+    route: {
+      path: '/dev-environment',
+      name: 'dev-environment',
+      component: () => import('@/modules/planned/PlannedPlaceholder.vue'),
+      meta: { title: '开发环境' },
+    },
   },
 ]
 
-export const dashboardModules = toolModules.filter((module) => module.dashboard)
+export const dashboardModules = toolModules.filter(
+  (module): module is ToolModule & { dashboard: Component } => module.dashboard !== undefined,
+)
+
+export const plannedModules = toolModules.filter((module) => module.planned)

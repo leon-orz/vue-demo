@@ -8,5 +8,3 @@ pub mod preferences;
 pub mod proxy_setting;
 pub mod subscription;
 pub mod sysproxy;
-#[cfg(windows)]
-pub mod system_tools;

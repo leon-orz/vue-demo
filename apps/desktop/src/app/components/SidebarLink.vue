@@ -9,8 +9,9 @@ withDefaults(
     icon: Component
     active: boolean
     badge?: string
+    planned?: boolean
   }>(),
-  { badge: undefined },
+  { badge: undefined, planned: false },
 )
 </script>
 
@@ -26,9 +27,17 @@ withDefaults(
     :aria-current="active ? 'page' : undefined"
   >
     <component :is="icon" class="size-4 shrink-0" aria-hidden="true" />
-    <span class="min-w-0 flex-1 truncate">{{ label }}</span>
+    <span class="min-w-0 flex-1 truncate" :class="planned ? 'text-muted-foreground/70' : ''">{{
+      label
+    }}</span>
     <span
-      v-if="badge"
+      v-if="planned"
+      class="rounded-sm border border-dashed px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
+    >
+      规划中
+    </span>
+    <span
+      v-else-if="badge"
       class="rounded-sm bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary"
     >
       {{ badge }}

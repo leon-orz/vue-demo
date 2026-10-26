@@ -35,21 +35,6 @@ beforeEach(() => {
           last_error: null,
           updating: false,
         }
-      case 'system_tools_information':
-        return {
-          windows_edition: 'Windows 11',
-          version: '24H2',
-          architecture: 'x64',
-          computer_name: '测试设备',
-          processor: '测试处理器',
-          total_memory_bytes: 16_000_000_000n,
-          system_drive_free_bytes: 50_000_000_000n,
-          system_drive_total_bytes: 100_000_000_000n,
-        }
-      case 'system_tools_diagnose_network':
-        return { dns_resolution: true, tcp_connection: false, message: '测试目标连接失败' }
-      case 'system_tools_scan_cleanup':
-        return { files: 10n, bytes: 2048n, skipped_entries: 2n }
       default:
         return []
     }
@@ -72,29 +57,19 @@ async function open(path: string) {
 }
 
 describe('模块入口', () => {
-  it('网络诊断按需执行，切换系统状态和空间维护不会自动扫描', async () => {
-    const router = await open('/network-diagnostics')
+  it('规划中模块路由渲染占位页，不发起业务 IPC', async () => {
+    for (const path of [
+      '/feed',
+      '/ai-gateway',
+      '/system-tuning',
+      '/network-tuning',
+      '/dev-environment',
+    ]) {
+      await open(path)
+      expect(wrapper!.text()).toContain('占位页面')
+      expect(wrapper!.text()).toContain('规划中')
+    }
     expect(invoke).not.toHaveBeenCalled()
-    const diagnose = wrapper!.findAll('button').find((button) => button.text().includes('诊断'))!
-    await diagnose.trigger('click')
-    await flushPromises()
-    expect(wrapper!.text()).toContain('测试目标连接失败')
-
-    await router.push('/system-status')
-    await flushPromises()
-    expect(wrapper!.text()).toContain('测试设备')
-    expect(wrapper!.text()).not.toContain('测试目标连接失败')
-
-    await router.push('/storage')
-    await flushPromises()
-    expect(wrapper!.text()).toContain('50%')
-    expect(invoke.mock.calls.some(([command]) => command === 'system_tools_scan_cleanup')).toBe(
-      false,
-    )
-    const scan = wrapper!.findAll('button').find((button) => button.text().includes('扫描'))!
-    await scan.trigger('click')
-    await flushPromises()
-    expect(wrapper!.text()).toContain('2.0 KB')
   })
 
   it('软件设置只加载软件偏好，不读取业务账户或日志目录', async () => {

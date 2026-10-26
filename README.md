@@ -1,23 +1,23 @@
 # Toogl（图格）
 
-Toogl 是面向 Windows 10/11 的个人桌面实用工具箱。
+面向 Windows 10/11 的个人桌面实用工具箱。以 **mihomo 魔法工具** 为核心，辅以首页状态看板和软件设置；信息订阅、AI 网关、系统优化、网络优化、开发环境为规划中模块（侧栏"规划中"分组，占位页无业务逻辑）。
 
-产品以 **mihomo 魔法工具** 为核心，同时保留首页状态看板、网络诊断、系统状态、空间维护和软件设置。首页看板汇总各模块状态并提供入口，不复制模块业务逻辑。
-
-技术栈：Tauri 2、Vue 3、TypeScript、Pinia、Rust、SQLite、mihomo；使用 pnpm 与 Cargo workspace。
+技术栈：Tauri 2、Vue 3、TypeScript、Pinia、Rust、SQLite、mihomo；pnpm 与 Cargo workspace。当前只使用 Windows 系统代理，不做 TUN、远程 Hub、手机端、多用户。
 
 ## 产品结构
 
 ```text
 首页看板
-├─ 魔法工具       mihomo、代理节点、模式、系统代理、订阅和手动导入
-├─ 网络诊断       固定 DNS/TCP 检查和 DNS 缓存刷新
-├─ 系统状态       Windows 与设备只读信息
-├─ 空间维护       当前用户 Temp 目录安全扫描
-└─ 软件设置       Toogl 主题和版本信息
+├─ 魔法工具（已实现）  mihomo、代理节点、模式、系统代理、订阅和手动导入
+├─ 信息订阅（规划中）  RSS 与 GitHub 信息聚合
+├─ AI 网关（规划中）   AI 模型聚合中转平台用量与状态
+├─ 系统优化（规划中）  游戏设置检查与后台占用清理
+├─ 网络优化（规划中）  网络状态检测与修复
+├─ 开发环境（规划中）  端口冲突、残留进程处理
+└─ 软件设置（已实现）  Toogl 主题和版本信息
 ```
 
-魔法工具优先保证真实 Windows 环境下的启动、节点切换、系统代理、退出恢复和订阅可靠性。当前不做 TUN、远程 Hub、手机端、多用户、AI API 网关、游戏加速或全面系统优化。
+各模块能力边界与"明确不做"见 [产品说明](docs/01-产品说明.md)。
 
 ## 环境要求
 
@@ -54,32 +54,25 @@ cargo test -p toogl-core export_bindings
 
 ## 目录
 
-- `apps/desktop/src/app`：固定路由、业务登记及应用壳导航组件
+- `apps/desktop/src/app`：模块登记、路由及应用壳导航组件
 - `apps/desktop/src/modules/dashboard`：首页状态看板布局
+- `apps/desktop/src/modules/planned`：五个规划中模块的共用占位页
 - `apps/desktop/src/modules/proxy`：魔法工具，管理 mihomo、节点、系统代理和订阅
-- `apps/desktop/src/modules/network-diagnostics`：固定网络诊断和 DNS 刷新
-- `apps/desktop/src/modules/system-status`：Windows 与设备只读信息
-- `apps/desktop/src/modules/storage`：Temp 目录扫描和空间概况
 - `apps/desktop/src/modules/settings`：应用主题和版本信息
-- `apps/desktop/src/shared`：错误规整、模块标签和小型公共能力
+- `apps/desktop/src/shared`：错误规整与小型公共能力
 - `apps/desktop/src-tauri/src`：Tauri 生命周期、命令层和 sidecar 管理
-- `crates/core`：Rust 核心业务、系统能力、订阅解析、持久化和模型
+- `crates/core`：Rust 核心业务、订阅解析、持久化和模型
 - `packages/core-types`：由 Rust `ts-rs` 自动生成的 TypeScript 类型
-- `docs`：产品需求、开发计划和模块接入指南
+- `docs`：产品说明、架构数据流、进度方向和模块接入规范
 
-### 当前实现与开发边界
-
-- 六个一级入口已有实际页面；三个基础工具不再共用系统工具聚合页。
-- 魔法工具已有看板摘要卡；其他模块的看板卡仍按开发计划推进，不能视为已完成。
-- 页面负责装配和加载，模块内 `components/` 负责展示，`use*.ts` 管理局部状态，`api.ts` 对接 IPC。
-- `system-status/useSystemInformation.ts` 同时供系统状态和空间维护读取系统盘数据，不复制查询逻辑。
-- `components/ui/` 保持基础 UI，`shared/` 放跨模块交互，`lib/` 放无副作用纯函数；不添加空服务层。
+各功能目录内有 `README.md`，记录该模块的逻辑链路、关键不变量与文件职责。
 
 ## 文档
 
-- [产品需求文档](docs/01-需求文档.md)：产品定位、模块范围、行为和验收
-- [开发计划](docs/02-开发计划.md)：架构、数据链路、分阶段开发和质量门禁
-- [模块开发指南](docs/03-模块开发指南.md)：模块登记、边界、测试和完成标准
-- [模块维护索引](AGENTS.md#模块维护入口与文档链路)：每个模块的代码入口、调用链、生命周期、安全边界和验证方式
+- [产品说明](docs/01-产品说明.md)：产品定位、模块能力边界、明确不做
+- [架构与数据流](docs/02-架构与数据流.md)：目录职责、IPC 清单、启动退出、订阅链、持久化
+- [开发状态与方向](docs/03-开发状态与方向.md)：实现进度、待人工验收清单、已知缺口
+- [模块开发指南](docs/04-模块开发指南.md)：模块登记、边界、测试和完成标准
+- [AGENTS.md](AGENTS.md)：全局约束、协作边界与质量门禁
 
 代码与文档冲突时，以当前代码和实际验收结果为准；计划功能不得写成已完成。

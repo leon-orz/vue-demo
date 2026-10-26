@@ -3,12 +3,12 @@ import { LayoutDashboard, Settings } from '@lucide/vue'
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 import logoUrl from '@/assets/logo.svg'
-import { toolModules } from '@/app/modules'
+import { plannedModules, toolModules } from '@/app/modules'
 import SidebarLink from './SidebarLink.vue'
 
 const route = useRoute()
 const coreModule = toolModules.find((module) => module.id === 'proxy')
-const utilityModules = toolModules.filter((module) => module.id !== 'proxy')
+const utilityModules = toolModules.filter((module) => module.id !== 'proxy' && !module.planned)
 const dashboardActive = computed(() => route.path === '/dashboard')
 const settingsActive = computed(() => route.path === '/settings')
 const isActive = (path: string) => route.path === path
@@ -55,6 +55,19 @@ const isActive = (path: string) => route.path === path
           :label="module.title"
           :icon="module.icon"
           :active="isActive(module.route.path)"
+        />
+      </section>
+
+      <section v-if="plannedModules.length" class="flex flex-col gap-1">
+        <p class="px-3 pb-1 text-[11px] font-semibold text-muted-foreground">规划中</p>
+        <SidebarLink
+          v-for="module in plannedModules"
+          :key="module.id"
+          :to="module.route.path"
+          :label="module.title"
+          :icon="module.icon"
+          :active="isActive(module.route.path)"
+          planned
         />
       </section>
     </nav>
