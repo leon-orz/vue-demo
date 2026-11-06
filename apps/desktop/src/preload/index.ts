@@ -1,11 +1,15 @@
 /**
  * preload:通过 contextBridge 向渲染层暴露安全 API
  */
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 
 const api = {
   /** 拖拽文件分流 */
   classifyFiles: (paths: string[]) => ipcRenderer.invoke('file:classify', paths),
+  /**
+   * Electron 32+ 移除了 File.path,渲染层需经此方法获取拖拽文件的真实路径
+   */
+  getFilePath: (file: File) => webUtils.getPathForFile(file),
   /** 看图 */
   listImagesInDir: (dir: string) => ipcRenderer.invoke('viewer:listDir', dir),
   readImage: (file: string) => ipcRenderer.invoke('viewer:read', file),
@@ -17,7 +21,9 @@ const api = {
   cancelTask: (taskId: string) => ipcRenderer.invoke('task:cancel', taskId),
   listTasks: () => ipcRenderer.invoke('task:list'),
   /** 对话框/外壳 */
-  pickPaths: () => ipcRenderer.invoke('dialog:pickDirs'),
+  pickImage: () => ipcRenderer.invoke('dialog:pickImage'),
+  pickArchive: () => ipcRenderer.invoke('dialog:pickArchive'),
+  pickDir: () => ipcRenderer.invoke('dialog:pickDir'),
   showInFolder: (p: string) => ipcRenderer.invoke('shell:showInFolder', p),
   /** 订阅任务事件 */
   onTaskCreated: (cb: (t: unknown) => void) => {

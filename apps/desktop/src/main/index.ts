@@ -86,13 +86,36 @@ ipcMain.handle('task:cancel', (_e, taskId: string) => cancelTask(taskId))
 /** 任务快照 */
 ipcMain.handle('task:list', () => listTasks())
 
-/** 选择目录/文件对话框 */
-ipcMain.handle('dialog:pickDirs', async () => {
-  if (!mainWindow) return []
+/** 选择图片文件 */
+ipcMain.handle('dialog:pickImage', async () => {
+  if (!mainWindow) return ''
   const r = await dialog.showOpenDialog(mainWindow, {
-    properties: ['openFile', 'multiSelections', 'openDirectory']
+    title: '选择图片',
+    properties: ['openFile'],
+    filters: [{ name: '图片', extensions: ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif'] }]
   })
-  return r.canceled ? [] : r.filePaths
+  return r.canceled ? '' : r.filePaths[0]
+})
+
+/** 选择压缩包文件 */
+ipcMain.handle('dialog:pickArchive', async () => {
+  if (!mainWindow) return ''
+  const r = await dialog.showOpenDialog(mainWindow, {
+    title: '选择压缩包',
+    properties: ['openFile'],
+    filters: [{ name: '压缩包', extensions: ['zip', '7z', 'rar', 'tar', 'gz', 'tgz', 'bz2', 'xz', 'zst', 'iso', 'cab'] }]
+  })
+  return r.canceled ? '' : r.filePaths[0]
+})
+
+/** 选择目录(压缩输出位置等) */
+ipcMain.handle('dialog:pickDir', async () => {
+  if (!mainWindow) return ''
+  const r = await dialog.showOpenDialog(mainWindow, {
+    title: '选择文件夹',
+    properties: ['openDirectory']
+  })
+  return r.canceled ? '' : r.filePaths[0]
 })
 
 /** 在资源管理器中显示 */

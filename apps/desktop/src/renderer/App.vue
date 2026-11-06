@@ -35,7 +35,8 @@ async function onDrop(e: DragEvent): Promise<void> {
   e.preventDefault()
   dragDepth = 0
   dragging.value = false
-  const paths = [...(e.dataTransfer?.files ?? [])].map((f) => f.path)
+  // Electron 32+ 已移除 File.path,须经 preload 的 webUtils 转换
+  const paths = [...(e.dataTransfer?.files ?? [])].map((f) => window.api.getFilePath(f))
   if (paths.length === 0) return
   const { images, archives } = await window.api.classifyFiles(paths)
   if (archives.length > 0) {

@@ -25,10 +25,10 @@ watch(() => route.query.file, (f) => {
 }, { immediate: true })
 
 async function pickArchive(): Promise<void> {
-  const paths = await window.api.pickPaths()
-  if (paths.length > 0) {
-    archivePath.value = paths[0]
-    destDir.value = paths[0].replace(/\.[^.\\/]+$/, '')
+  const file = await window.api.pickArchive()
+  if (file) {
+    archivePath.value = file
+    destDir.value = file.replace(/\.[^.\\/]+$/, '')
     status.value = 'idle'
   }
 }

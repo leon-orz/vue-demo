@@ -26,6 +26,26 @@ async function openFile(file: string): Promise<void> {
   dirFiles.value = await window.api.listImagesInDir(dir)
 }
 
+/** 对话框选择单张图片打开 */
+async function pickImage(): Promise<void> {
+  const file = await window.api.pickImage()
+  if (file) openFile(file)
+}
+
+/** 对话框选择文件夹,自动打开其中第一张图 */
+async function pickFolder(): Promise<void> {
+  const dir = await window.api.pickDir()
+  if (!dir) return
+  const files = await window.api.listImagesInDir(dir)
+  if (files.length > 0) {
+    openFile(files[0])
+  } else {
+    // 空文件夹:清空列表但保留提示
+    currentFile.value = ''
+    dirFiles.value = []
+  }
+}
+
 function resetView(): void {
   scale.value = 1
   offsetX.value = 0
@@ -103,7 +123,17 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
     @dragover.prevent
     @drop="onViewerDrop"
   >
-    <div v-if="!currentFile" class="empty">拖入图片,或直接把图片拖到窗口任意位置</div>
+    <div v-if="!currentFile" class="empty">
+      <p>拖入图片,或</p>
+      <div class="empty-actions">
+        <button @click="pickImage">打开图片…</button>
+        <button @click="pickFolder">打开文件夹…</button>
+      </div>
+    </div>
+    <div v-if="currentFile" class="toolbar">
+      <button @click="pickImage">打开图片…</button>
+      <button @click="pickFolder">打开文件夹…</button>
+    </div>
     <img
       v-else
       :src="'file:///' + currentFile.replace(/\\/g, '/')"
@@ -139,7 +169,28 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
   user-select: none;
   transition: none;
 }
-.empty { color: #666; font-size: 15px; }
+.empty { color: #666; font-size: 15px; text-align: center; }
+.empty-actions { display: flex; gap: 12px; justify-content: center; margin-top: 16px; }
+.toolbar {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  display: flex;
+  gap: 8px;
+  z-index: 10;
+}
+.toolbar button,
+.empty-actions button {
+  background: rgba(42, 44, 49, 0.9);
+  border: 1px solid #3a3d44;
+  border-radius: 6px;
+  padding: 6px 14px;
+  color: #ccc;
+  font-size: 13px;
+  cursor: pointer;
+}
+.toolbar button:hover,
+.empty-actions button:hover { background: #33363c; color: #fff; }
 .statusbar {
   position: absolute;
   bottom: 0;

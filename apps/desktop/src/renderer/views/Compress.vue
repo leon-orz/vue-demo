@@ -17,13 +17,12 @@ const status = ref<'idle' | 'running' | 'done' | 'error' | 'canceled'>('idle')
 const errorMsg = ref('')
 
 async function pickSources(): Promise<void> {
-  const paths = await window.api.pickPaths()
-  if (paths.length > 0) {
-    sources.value = paths
+  // 压缩来源支持多选文件与文件夹:先目录,再补充单选;MVP 先支持文件夹选择
+  const dir = await window.api.pickDir()
+  if (dir) {
+    sources.value = [dir]
     if (!targetPath.value) {
-      // 默认目标:第一个来源所在目录下的 archive.7z
-      const first = paths[0].replace(/[\\/][^\\/]+$/, '')
-      targetPath.value = `${first}/archive.${format.value === 'tar.gz' ? 'tar' : format.value}`
+      targetPath.value = `${dir}/archive.${format.value === 'tar.gz' ? 'tar' : format.value}`
     }
   }
 }
