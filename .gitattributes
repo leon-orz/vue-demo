@@ -1,7 +1,0 @@
-# 全仓统一 LF 换行，消除 Windows 下 LF/CRLF 噪音
-* text=auto eol=lf
-
-# 二进制文件明确标注，禁止换行符转换
-*.exe binary
-*.png binary
-*.ico binary
