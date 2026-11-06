@@ -1,9 +1,0 @@
-{
-  "name": "@toogl/core-types",
-  "version": "0.1.0",
-  "private": true,
-  "type": "module",
-  "exports": {
-    ".": "./bindings/index.ts"
-  }
-}
