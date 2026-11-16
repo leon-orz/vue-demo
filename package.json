@@ -5,9 +5,5 @@
   "engines": {
     "node": ">=24"
   },
-  "scripts": {
-    "dev": "pnpm -F @vue-demo/desktop dev",
-    "build": "pnpm -F @vue-demo/desktop build",
-    "start": "pnpm -F @vue-demo/desktop start"
-  }
+  "scripts": {}
 }
